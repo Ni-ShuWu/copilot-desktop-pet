@@ -365,7 +365,10 @@ const session = await joinSession({
 });
 
 // ---- 会话事件 → 桌宠状态联动（类似 Codex companion 的反应） ----
-session.on("tool.execution_start", () => { petState.activity = "working"; heartbeat(); });
+const markWorking = () => { petState.activity = "working"; heartbeat(); };
+for (const ev of ["user.message", "assistant.turn_start", "assistant.message", "assistant.reasoning", "tool.execution_start", "tool.execution_complete"]) {
+    try { session.on(ev, markWorking); } catch {}
+}
 session.on("session.idle", (event) => {
     const wasWorking = petState.activity === "working";
     petState.activity = "idle";

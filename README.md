@@ -147,3 +147,7 @@ pet.example.json 示例配置
 
 跨会话原理：每个会话的扩展实例每 3 秒向共享目录写一条心跳（activity、桌宠 pid），
 桌宠跟随所有存活会话的聚合状态；`GET /api/sessions` 可查看各会话实时状态。
+
+## 贡献
+
+欢迎提交 Issue 和 PR，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
