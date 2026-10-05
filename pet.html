@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>桌宠</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    font-family: system-ui, "Segoe UI", sans-serif;
+    background: transparent;
+  }
+  #bar {
+    position: fixed; top: 8px; left: 8px; right: 8px;
+    display: flex; align-items: center; gap: 8px;
+    z-index: 10;
+  }
+  #bar button {
+    border: 1px solid rgba(128,128,128,.4);
+    background: rgba(128,128,128,.12);
+    color: inherit;
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #bar button:hover { background: rgba(128,128,128,.25); }
+  #status {
+    font-size: 11px;
+    opacity: .65;
+  }
+  #pet {
+    position: absolute;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    cursor: grab;
+    filter: drop-shadow(0 6px 8px rgba(0,0,0,.25));
+  }
+  #pet.dragging { cursor: grabbing; }
+  #bubble {
+    position: absolute;
+    max-width: 180px;
+    padding: 6px 10px;
+    border-radius: 12px;
+    background: #ffffff;
+    color: #1f2328;
+    border: 1px solid rgba(0,0,0,.12);
+    box-shadow: 0 4px 14px rgba(0,0,0,.18);
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -100%) translateY(-10px) scale(.9);
+    transition: opacity .18s ease, transform .18s ease;
+    white-space: pre-wrap;
+    word-break: break-word;
+    text-align: center;
+    z-index: 5;
+  }
+  #bubble.show {
+    opacity: 1;
+    transform: translate(-50%, -100%) translateY(-16px) scale(1);
+  }
+  #err {
+    position: fixed; left: 8px; bottom: 6px;
+    font-size: 11px; color: #b00020;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="btnToggle">召唤桌宠</button>
+  <span id="status">…</span>
+</div>
+<canvas id="pet"></canvas>
+<div id="bubble"></div>
+<div id="err"></div>
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("pet");
+  var ctx = canvas.getContext("2d");
+  var bubble = document.getElementById("bubble");
+  var errBox = document.getElementById("err");
+  var btnToggle = document.getElementById("btnToggle");
+  var statusEl = document.getElementById("status");
+
+  var config = null;
+  var configRaw = "";
+  var img = new Image();
+  var imgReady = false;
+
+  var pet = {
+    x: 60, dir: 1, anim: "idle", frame: 0, frameTimer: 0,
+    mode: "idle", nextDecisionAt: Date.now() + 3000,
+    lastInteractionAt: Date.now(), dragging: false, dragOffsetX: 0,
+    hopV: 0, hopY: 0, remoteOverride: null
+  };
+
+  var remoteMessage = null;
+  var bubbleUntil = 0;
+
+  function rand(min, max) { return min + Math.random() * (max - min); }
+  function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+  function showError(msg) {
+    errBox.style.display = msg ? "block" : "none";
+    errBox.textContent = msg || "";
+  }
+
+  function loadConfig() {
+    return fetch("/pet.json", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (cfg) {
+        var raw = JSON.stringify(cfg);
+        if (raw === configRaw) return;
+        configRaw = raw;
+        applyConfig(cfg);
+      })
+      .catch(function (e) { showError("pet.json 读取失败: " + e.message); });
+  }
+
+  function applyConfig(cfg) {
+    var oldSprite = config && config.sprite;
+    config = cfg;
+    showError(cfg._error ? "pet.json: " + cfg._error : null);
+
+    var w = (cfg.frameWidth || 32) * (cfg.scale || 4);
+    var h = (cfg.frameHeight || 32) * (cfg.scale || 4);
+    canvas.width = cfg.frameWidth || 32;
+    canvas.height = cfg.frameHeight || 32;
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    bubble.style.fontSize = ((cfg.speech && cfg.speech.fontSize) || 13) + "px";
+
+    if (cfg.sprite !== oldSprite || !imgReady) {
+      imgReady = false;
+      img = new Image();
+      img.onload = function () { imgReady = true; };
+      img.onerror = function () { showError("贴图加载失败: " + cfg.sprite); };
+      img.src = "/" + cfg.sprite + "?t=" + Date.now();
+    }
+    if (!cfg.animations || !cfg.animations[pet.anim]) {
+      pet.anim = cfg.defaultAnimation || "idle";
+    }
+    clampToStage();
+  }
+
+  function clampToStage() {
+    var w = canvas.getBoundingClientRect().width || 128;
+    var maxX = Math.max(0, window.innerWidth - w);
+    pet.x = Math.min(Math.max(pet.x, 0), maxX);
+  }
+
+  function currentAnimName() {
+    if (pet.remoteOverride && config.animations[pet.remoteOverride]) return pet.remoteOverride;
+    if (pet.mode === "walk" && config.animations.walk) return "walk";
+    if (pet.mode === "sleep" && config.animations.sleep) return "sleep";
+    return config.animations[pet.anim] ? pet.anim : (config.defaultAnimation || "idle");
+  }
+
+  function decide() {
+    var b = config.behavior || {};
+    var range = b.wanderIntervalSec || [3, 8];
+    pet.nextDecisionAt = Date.now() + rand(range[0], range[1]) * 1000;
+    if (b.autoWander === false) { pet.mode = "idle"; return; }
+
+    var idleFor = (Date.now() - pet.lastInteractionAt) / 1000;
+    if (b.sleepAfterIdleSec && idleFor > b.sleepAfterIdleSec && config.animations.sleep) {
+      pet.mode = "sleep";
+      return;
+    }
+    if (pet.mode === "sleep") return;
+
+    if (Math.random() < 0.55 && config.animations.walk) {
+      pet.mode = "walk";
+      pet.dir = Math.random() < 0.5 ? -1 : 1;
+    } else {
+      pet.mode = "idle";
+    }
+  }
+
+  var lastTs = 0;
+  function tick(ts) {
+    requestAnimationFrame(tick);
+    if (!config) return;
+    var dt = Math.min(0.1, (ts - lastTs) / 1000 || 0);
+    lastTs = ts;
+
+    var animName = currentAnimName();
+    var anim = config.animations[animName] || { row: 0, frames: 1 };
+    var fps = anim.fps || config.fps || 8;
+
+    pet.frameTimer += dt;
+    if (pet.frameTimer >= 1 / fps) {
+      pet.frameTimer = 0;
+      pet.frame = (pet.frame + 1) % Math.max(1, anim.frames || 1);
+    }
+
+    var b = config.behavior || {};
+    if (!pet.dragging && !pet.remoteOverride) {
+      if (Date.now() >= pet.nextDecisionAt) decide();
+      if (pet.mode === "walk") {
+        var speed = b.walkSpeedPxPerSec || 40;
+        pet.x += pet.dir * speed * dt;
+        var w = canvas.getBoundingClientRect().width;
+        if (pet.x <= 0) { pet.x = 0; pet.dir = 1; }
+        if (pet.x >= window.innerWidth - w) { pet.x = window.innerWidth - w; pet.dir = -1; }
+      }
+    }
+
+    if (pet.hopV !== 0 || pet.hopY !== 0) {
+      pet.hopY += pet.hopV * dt;
+      pet.hopV -= 900 * dt;
+      if (pet.hopY >= 0) { pet.hopY = 0; pet.hopV = 0; }
+    }
+
+    render(anim);
+    updateBubble();
+  }
+
+  function render(anim) {
+    if (!config) return;
+    anim = anim || config.animations[currentAnimName()] || { row: 0, frames: 1 };
+    var fw = config.frameWidth || 32;
+    var fh = config.frameHeight || 32;
+    var frame = pet.frame % Math.max(1, anim.frames || 1);
+    var row = anim.row || 0;
+
+    ctx.clearRect(0, 0, fw, fh);
+    if (imgReady) {
+      if (pet.dir < 0) {
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, frame * fw, row * fh, fw, fh, -fw, 0, fw, fh);
+        ctx.restore();
+      } else {
+        ctx.drawImage(img, frame * fw, row * fh, fw, fh, 0, 0, fw, fh);
+      }
+    }
+    canvas.style.left = pet.x + "px";
+    canvas.style.bottom = (10 + pet.hopY) + "px";
+  }
+
+  function setBubble(text, ms) {
+    bubble.textContent = text;
+    bubbleUntil = Date.now() + ms;
+    bubble.classList.add("show");
+  }
+
+  function updateBubble() {
+    var rect = canvas.getBoundingClientRect();
+    bubble.style.left = (rect.left + rect.width / 2) + "px";
+    bubble.style.bottom = (window.innerHeight - rect.top + 4) + "px";
+    if (bubbleUntil && Date.now() > bubbleUntil) {
+      bubbleUntil = 0;
+      bubble.classList.remove("show");
+    }
+  }
+
+  // ---- 交互：拖动 + 戳 ----
+  var downX = 0, downY = 0, moved = false;
+
+  canvas.addEventListener("pointerdown", function (e) {
+    pet.dragging = true;
+    moved = false;
+    downX = e.clientX; downY = e.clientY;
+    pet.dragOffsetX = e.clientX - pet.x;
+    canvas.classList.add("dragging");
+    canvas.setPointerCapture(e.pointerId);
+    pet.lastInteractionAt = Date.now();
+    if (pet.mode === "sleep") { pet.mode = "idle"; setBubble("!", 600); }
+  });
+
+  canvas.addEventListener("pointermove", function (e) {
+    if (!pet.dragging) return;
+    if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) moved = true;
+    pet.x = e.clientX - pet.dragOffsetX;
+    clampToStage();
+    pet.lastInteractionAt = Date.now();
+  });
+
+  canvas.addEventListener("pointerup", function () {
+    pet.dragging = false;
+    canvas.classList.remove("dragging");
+    pet.lastInteractionAt = Date.now();
+    if (!moved) {
+      pet.hopV = 220;
+      var phrases = (config.speech && config.speech.phrases) || [];
+      if (phrases.length) setBubble(pick(phrases), 1800);
+    }
+  });
+
+  // ---- 控制栏 ----
+  btnToggle.addEventListener("click", function () {
+    fetch("/api/pet/toggle", { method: "POST" }).then(pollState).catch(function () {});
+  });
+
+  function pollState() {
+    fetch("/api/state", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        pet.remoteOverride = s.animation || null;
+        if (s.message && s.message !== remoteMessage) {
+          remoteMessage = s.message;
+          setBubble(s.message, 4000);
+        }
+        if (!s.message) remoteMessage = null;
+        btnToggle.textContent = s.running ? "收回桌宠" : "召唤桌宠";
+        statusEl.textContent = (s.running ? "桌面运行中" : "未召唤") +
+          (s.activity === "working" ? " · agent 工作中 🛠" : "");
+      })
+      .catch(function () {});
+  }
+
+  window.addEventListener("resize", clampToStage);
+
+  loadConfig();
+  setInterval(loadConfig, 4000);
+  setInterval(pollState, 800);
+  pollState();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

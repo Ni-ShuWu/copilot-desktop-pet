@@ -1,0 +1,6 @@
+/.github/
+*.png
+*.gif
+*.webp
+pet.json
+!pet.example.json

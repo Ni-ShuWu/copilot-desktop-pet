@@ -1,0 +1,25 @@
+{
+  "name": "Copilot 桌宠",
+  "autoStart": false,
+  "sprite": "spritesheet.png",
+  "frameWidth": 32,
+  "frameHeight": 32,
+  "scale": 4,
+  "fps": 8,
+  "defaultAnimation": "idle",
+  "animations": {
+    "idle":  { "row": 0, "frames": 4 },
+    "walk":  { "row": 1, "frames": 4 },
+    "sleep": { "row": 2, "frames": 4 }
+  },
+  "behavior": {
+    "autoWander": true,
+    "walkSpeedPxPerSec": 40,
+    "wanderIntervalSec": [3, 8],
+    "sleepAfterIdleSec": 45
+  },
+  "speech": {
+    "phrases": ["(◕‿◕)", "喵？", "戳我干嘛~"],
+    "fontSize": 13
+  }
+}
