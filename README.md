@@ -29,6 +29,12 @@
 - 「让桌宠说：……」
 - 「让桌宠播 xxx 动画」/「恢复自动行为」
 
+也可以完全不依赖 Copilot，双击独立运行（独立模式不联动会话状态）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File pet-window.ps1
+```
+
 桌面上：
 
 - 左键拖拽移动；单击（不拖动）戳一戳说话

@@ -1,8 +1,9 @@
 ﻿# desktop-pet 桌面悬浮窗（WPF 透明置顶窗，类 Codex 桌宠）
 # 由 extension.mjs 拉起：powershell -STA -File pet-window.ps1 -ExtDir <dir> -StateUrl <url>
+# 也可直接双击/手动运行（不带参数）：ExtDir 默认脚本所在目录，StateUrl 为空则独立模式（不联动会话状态）
 param(
-    [Parameter(Mandatory=$true)][string]$ExtDir,
-    [Parameter(Mandatory=$true)][string]$StateUrl
+    [string]$ExtDir = $PSScriptRoot,
+    [string]$StateUrl = ""
 )
 
 Add-Type -AssemblyName PresentationFramework
@@ -292,6 +293,7 @@ $pollTimer.Add_Tick({
         } catch {}
     }
 
+    if ($StateUrl -eq "") { return }   # 独立模式：不联动会话状态，也不因连不上服务自杀
     try {
         $s = Invoke-RestMethod -Uri ($StateUrl + "api/state") -Method Get -TimeoutSec 2
         $script:failCount = 0
