@@ -113,6 +113,29 @@ async function readRegistry() {
     return out;
 }
 
+// ---- 兜底：未加载本扩展的会话，通过其事件日志最近是否有写入判断是否在工作 ----
+const SESSION_STATE_DIR = path.join(os.homedir(), ".copilot", "session-state");
+const ACTIVE_WINDOW_MS = 6000;
+let activeCache = { ts: 0, value: false };
+
+async function anySessionActive() {
+    const now = Date.now();
+    if (now - activeCache.ts < 1500) return activeCache.value;
+    let active = false;
+    try {
+        const dirs = await readdir(SESSION_STATE_DIR);
+        const results = await Promise.all(dirs.map(async (d) => {
+            try {
+                const st = await stat(path.join(SESSION_STATE_DIR, d, "events.jsonl"));
+                return now - st.mtimeMs < ACTIVE_WINDOW_MS;
+            } catch { return false; }
+        }));
+        active = results.some(Boolean);
+    } catch {}
+    activeCache = { ts: now, value: active };
+    return active;
+}
+
 async function startDesktopPet() {
     if (isPetRunning()) return { ok: true, already: true, pid: petProc.pid };
     if (!serverEntry) return { ok: false, error: "local server not started" };
@@ -184,7 +207,7 @@ async function startServer() {
             }
             if (p === "/api/state") {
                 const entries = await readRegistry();
-                const anyWorking = petState.activity === "working" || entries.some((e) => e.activity === "working");
+                const anyWorking = petState.activity === "working" || entries.some((e) => e.activity === "working") || await anySessionActive();
                 const foreignPet = entries.find((e) => e.pid !== process.pid && pidAlive(e.petPid));
                 res.setHeader("Content-Type", "application/json; charset=utf-8");
                 res.end(JSON.stringify({
