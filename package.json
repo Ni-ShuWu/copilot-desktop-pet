@@ -1,0 +1,14 @@
+{
+  "name": "copilot-desktop-pet",
+  "version": "0.2.0",
+  "private": true,
+  "description": "桌宠 Desktop Pet：住在 Windows 桌面上的 2D 桌宠，与 GitHub Copilot 会话联动",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

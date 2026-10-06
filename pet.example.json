@@ -7,6 +7,7 @@
   "scale": 4,
   "fps": 8,
   "defaultAnimation": "idle",
+  "pollIntervalMs": 250,
   "animations": {
     "idle":  { "row": 0, "frames": 4 },
     "walk":  { "row": 1, "frames": 4 },
@@ -21,5 +22,10 @@
   "speech": {
     "phrases": ["(◕‿◕)", "喵？", "戳我干嘛~"],
     "fontSize": 13
+  },
+  "externalEvents": {
+    "enabled": false,
+    "port": 0,
+    "token": ""
   }
 }
