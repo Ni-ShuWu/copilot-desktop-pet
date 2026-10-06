@@ -130,6 +130,7 @@ async function readRegistry() {
 }
 
 // ---- 兜底：未加载本扩展的会话，通过其事件日志最近是否有写入判断是否在工作 ----
+// 注意：pet-window.ps1 的独立模式用同口径（6 秒写入窗口）本地检测 Copilot App 与会话活跃度，改动时请同步
 const SESSION_STATE_DIR = path.join(os.homedir(), ".copilot", "session-state");
 const ACTIVE_WINDOW_MS = 6000;
 let activeCache = { ts: 0, value: false };
