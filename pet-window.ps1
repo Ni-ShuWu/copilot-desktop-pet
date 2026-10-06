@@ -437,7 +437,38 @@ $window.Add_MouseLeftButtonUp({
 })
 
 # ---- 右键菜单 ----
+# 设置面板 = 扩展 HTTP 服务上的 pet.html（桌宠库：切换 / 导入 / 保存）
+# 扩展拉起本窗时会传 -StateUrl；独立模式则从心跳注册表里找在跑的扩展实例
+# 注意：注册表清理只在扩展的 readRegistry 路径上做；独立模式打开设置时往往没有扩展在跑，
+# 所以这里必须自己做新鲜度校验（与 extension.mjs 的 REG_STALE_MS 同口径），过期/死进程的心跳文件顺手删除
+function Get-PanelUrl {
+    if ($StateUrl -ne "") { return $StateUrl }
+    $dir = Join-Path $env:TEMP "copilot-desktop-pet"
+    $staleMs = 12000
+    foreach ($f in Get-ChildItem $dir -Filter "inst-*.json" -ErrorAction SilentlyContinue) {
+        try {
+            $j = Get-Content -Raw $f.FullName | ConvertFrom-Json
+            $fresh = $j.ts -and (((Get-Date) - [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$j.ts).LocalDateTime).TotalMilliseconds -lt $staleMs)
+            $alive = $j.pid -and (Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue)
+            if (-not $fresh -or -not $alive) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; continue }
+            if ($j.url) { return [string]$j.url }
+        } catch {}
+    }
+    return ""
+}
+
 $menu = New-Object System.Windows.Controls.ContextMenu
+
+$itemSettings = New-Object System.Windows.Controls.MenuItem
+$itemSettings.Header = "打开设置"
+$itemSettings.Add_Click({
+    $url = Get-PanelUrl
+    if ($url -ne "") { Start-Process $url }
+    else { Show-Bubble "没有运行中的桌宠服务，先打开 Copilot 或运行 start-pet.bat" 4500 }
+})
+$menu.Items.Add($itemSettings) | Out-Null
+
+$menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 
 $itemWander = New-Object System.Windows.Controls.MenuItem
 $itemWander.Header = "自动走动 开/关"

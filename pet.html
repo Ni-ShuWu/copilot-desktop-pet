@@ -31,6 +31,34 @@
     font-size: 11px;
     opacity: .65;
   }
+  #library {
+    position: fixed; top: 48px; left: 8px; z-index: 20;
+    width: min(340px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+    box-sizing: border-box; overflow: auto; padding: 14px;
+    color: #e8eef7; background: #152033;
+    border: 1px solid #34445d; border-radius: 12px;
+    box-shadow: 0 12px 36px rgba(0,0,0,.38);
+    font-size: 12px; user-select: text; -webkit-user-select: text;
+  }
+  #library[hidden] { display: none; }
+  .library-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .library-head strong { font-size: 14px; letter-spacing: .02em; }
+  #library button, #library .file-button {
+    box-sizing: border-box; border: 1px solid #415572; border-radius: 7px;
+    background: #202e44; color: #e8eef7; padding: 6px 9px; font: inherit; cursor: pointer;
+  }
+  #library button:hover, #library .file-button:hover { background: #2a3c56; }
+  #petList { display: grid; gap: 6px; margin: 8px 0 12px; }
+  .pet-option { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px; border: 1px solid #34445d; border-radius: 8px; }
+  .pet-option.active { border-color: #64c6bd; background: #1a303d; }
+  .pet-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pet-active { color: #79d7c9; font-size: 10px; white-space: nowrap; }
+  .library-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+  #libraryHint { min-height: 16px; margin-top: 8px; color: #a9b8cb; line-height: 1.4; }
+  #libraryHint.error { color: #ffaaa5; }
+  #configFile, #spriteFile { display: none; }
+  #library button:focus-visible, #library .file-button:focus-within { outline: 2px solid #79d7c9; outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; } }
   #pet {
     position: absolute;
     image-rendering: pixelated;
@@ -71,8 +99,19 @@
 <body>
 <div id="bar">
   <button id="btnToggle">召唤桌宠</button>
+  <button id="btnLibrary" aria-expanded="false" aria-controls="library">切换桌宠</button>
   <span id="status">…</span>
 </div>
+<section id="library" hidden aria-label="桌宠库">
+  <div class="library-head"><strong>桌宠库</strong><button id="btnCloseLibrary" aria-label="关闭桌宠库">关闭</button></div>
+  <div id="petList" aria-live="polite"></div>
+  <div class="library-actions">
+    <button id="btnSavePet">保存当前桌宠</button>
+    <label class="file-button">导入桌宠<input id="configFile" type="file" accept=".json,application/json"></label>
+    <label class="file-button">选择贴图<input id="spriteFile" type="file" accept=".png,.gif,.webp,image/png,image/gif,image/webp"></label>
+  </div>
+  <div id="libraryHint" role="status">导入配置 JSON 和对应的 spritesheet 图片，保存后可随时切换。</div>
+</section>
 <canvas id="pet"></canvas>
 <div id="bubble"></div>
 <div id="err"></div>
@@ -86,6 +125,12 @@
   var errBox = document.getElementById("err");
   var btnToggle = document.getElementById("btnToggle");
   var statusEl = document.getElementById("status");
+  var btnLibrary = document.getElementById("btnLibrary");
+  var library = document.getElementById("library");
+  var petList = document.getElementById("petList");
+  var libraryHint = document.getElementById("libraryHint");
+  var configFile = document.getElementById("configFile");
+  var spriteFile = document.getElementById("spriteFile");
 
   var config = null;
   var configRaw = "";
@@ -292,6 +337,116 @@
       var phrases = (config.speech && config.speech.phrases) || [];
       if (phrases.length) setBubble(pick(phrases), 1800);
     }
+  });
+
+  // ---- 桌宠库 ----
+  function setLibraryHint(text, isError) {
+    libraryHint.textContent = text;
+    libraryHint.classList.toggle("error", !!isError);
+  }
+
+  function setLibraryOpen(open) {
+    library.hidden = !open;
+    btnLibrary.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) refreshPetLibrary();
+  }
+
+  function refreshPetLibrary() {
+    fetch("/api/pets", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        petList.textContent = "";
+        if (!data.pets || !data.pets.length) {
+          var empty = document.createElement("div");
+          empty.className = "pet-option";
+          empty.textContent = "桌宠库还是空的。保存当前桌宠，或导入配置与贴图。";
+          petList.appendChild(empty);
+          return;
+        }
+        data.pets.forEach(function (petInfo) {
+          var row = document.createElement("div");
+          row.className = "pet-option" + (petInfo.id === data.activeId ? " active" : "");
+          var name = document.createElement("span");
+          name.className = "pet-name";
+          name.textContent = petInfo.name;
+          row.appendChild(name);
+          if (petInfo.id === data.activeId) {
+            var active = document.createElement("span");
+            active.className = "pet-active";
+            active.textContent = "当前桌宠";
+            row.appendChild(active);
+          } else {
+            var use = document.createElement("button");
+            use.type = "button";
+            use.textContent = "切换";
+            use.addEventListener("click", function () {
+              use.disabled = true;
+              fetch("/api/pets/activate", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: petInfo.id })
+              }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "切换失败"); return d; }); })
+                .then(function (d) {
+                  applyConfig(d.config);
+                  configRaw = JSON.stringify(d.config);
+                  setLibraryHint("已切换为「" + petInfo.name + "」。", false);
+                  refreshPetLibrary();
+                }).catch(function (e) { setLibraryHint(e.message, true); use.disabled = false; });
+            });
+            row.appendChild(use);
+          }
+          petList.appendChild(row);
+        });
+      }).catch(function () { setLibraryHint("无法读取桌宠库，请确认桌宠服务正在运行。", true); });
+  }
+
+  btnLibrary.addEventListener("click", function () { setLibraryOpen(library.hidden); });
+  document.getElementById("btnCloseLibrary").addEventListener("click", function () { setLibraryOpen(false); });
+  document.getElementById("btnSavePet").addEventListener("click", function () {
+    fetch("/api/pets/save", { method: "POST" })
+      .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "保存失败"); return d; }); })
+      .then(function (d) { setLibraryHint("已保存「" + d.pet.name + "」，以后可直接切换。", false); refreshPetLibrary(); })
+      .catch(function (e) { setLibraryHint(e.message, true); });
+  });
+
+  var pendingConfig = "";
+  configFile.addEventListener("change", function () {
+    var file = configFile.files && configFile.files[0];
+    if (!file) return;
+    file.text().then(function (text) {
+      pendingConfig = text;
+      setLibraryHint("已选择配置「" + file.name + "」，再选择对应的 spritesheet 图片即可导入。", false);
+    }).catch(function () { setLibraryHint("无法读取配置文件。", true); });
+  });
+
+  spriteFile.addEventListener("change", function () {
+    var file = spriteFile.files && spriteFile.files[0];
+    if (!file) return;
+    if (!pendingConfig) {
+      setLibraryHint("请先选择桌宠配置 JSON，再选择贴图。", true);
+      spriteFile.value = "";
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var dataUrl = String(reader.result || "");
+      var comma = dataUrl.indexOf(",");
+      if (comma < 0) { setLibraryHint("贴图读取失败。", true); return; }
+      setLibraryHint("正在导入桌宠…", false);
+      fetch("/api/pets/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: pendingConfig, spriteName: file.name, spriteData: dataUrl.slice(comma + 1) })
+      }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "导入失败"); return d; }); })
+        .then(function (d) {
+          pendingConfig = "";
+          configFile.value = "";
+          spriteFile.value = "";
+          loadConfig();
+          setLibraryHint("已导入并切换到「" + d.pet.name + "」。", false);
+          refreshPetLibrary();
+        }).catch(function (e) { setLibraryHint(e.message, true); });
+    };
+    reader.onerror = function () { setLibraryHint("贴图读取失败。", true); };
+    reader.readAsDataURL(file);
   });
 
   // ---- 控制栏 ----

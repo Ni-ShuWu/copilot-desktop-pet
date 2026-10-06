@@ -41,7 +41,22 @@
 桌面上：
 
 - 左键拖拽移动；单击（不拖动）戳一戳说话
-- 右键菜单：开关自动走动、让它睡觉、退出
+- 右键菜单：打开设置（桌宠库：切换 / 导入 / 保存）、开关自动走动、让它睡觉、退出
+
+### 桌宠库（多桌宠切换）
+
+面板顶部点「切换桌宠」，或桌面右键「打开设置」：
+
+- **保存当前桌宠**：把当前 `pet.json` + 贴图存进 `pets/<uuid>/` 库目录
+- **导入桌宠**：选一份配置 JSON + 对应的 spritesheet 图片（支持外部工具生成的
+  `cell`/`row_counts` 记录格式，导入时自动归一化成 `frameWidth`/`frameHeight`/`animations`）
+- **切换**：点库里的任意桌宠立即换装（原子写入 `pet.json`，桌面窗热更新）
+
+对应 HTTP API：`GET /api/pets`、`POST /api/pets/save` / `/api/pets/import` / `/api/pets/activate`。
+`pets/` 是用户数据目录，已在 `.gitignore` 中忽略。
+
+扩展的 HTTP 服务默认固定监听 **10405** 端口（被占用时退回随机端口），
+外部工具可以按固定端口直接找到它；`PET_HTTP_PORT` 环境变量仍可覆盖。
 
 ### 外部事件监听（不装 Copilot 也能联动）
 
@@ -190,6 +205,7 @@ tests/           零依赖测试（node --test）
 | `GET /api/sessions` | 各会话心跳：pid、activity、桌宠 pid、服务端口 |
 | `POST /api/say` / `POST /api/animation` / `POST /api/reload` | 说话 / 切动画 / 重载配置 |
 | `POST /api/pet/show` / `hide` / `toggle` | 召唤 / 收回 / 切换桌宠 |
+| `GET /api/pets`；`POST /api/pets/save` / `import` / `activate` | 桌宠库：列表 / 保存当前 / 导入（JSON+贴图 base64）/ 切换 |
 | `POST /api/working` / `idle` / `activity` | 外部事件推送（需开启 `externalEvents`；`activity` 接受 `{ "activity": "working" \| "idle" }`） |
 
 ### 状态判定原理（依次命中即返回，`GET /api/state` 的 `activitySource` 会标明来源）
