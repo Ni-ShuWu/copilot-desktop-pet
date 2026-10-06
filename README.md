@@ -29,11 +29,9 @@
 - 「让桌宠说：……」
 - 「让桌宠播 xxx 动画」/「恢复自动行为」
 
-也可以完全不依赖 Copilot，双击独立运行（独立模式不联动会话状态）：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File pet-window.ps1
-```
+手动启动：**双击 `start-pet.bat`**（或 `powershell -File start-pet.ps1`）。
+脚本会自动判断：已经在跑就提示不重复召唤；有 Copilot 会话加载了扩展就让该实例召唤
+（联动会话状态）；都没有则独立模式直接拉起 `pet-window.ps1`（不联动会话状态）。
 
 桌面上：
 
