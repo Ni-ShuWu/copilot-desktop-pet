@@ -57,7 +57,7 @@ async function readConfig(force) {
         const st = await stat(CONFIG_FILE);
         if (force || st.mtimeMs !== configCache.mtimeMs) {
             const raw = await readFile(CONFIG_FILE, "utf8");
-            const parsed = JSON.parse(raw);
+            const parsed = JSON.parse(raw.replace(/^﻿/, ""));
             configCache = {
                 mtimeMs: st.mtimeMs,
                 config: mergeConfig(parsed),
