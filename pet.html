@@ -145,6 +145,7 @@
     if (!cfg.animations || !cfg.animations[pet.anim]) {
       pet.anim = cfg.defaultAnimation || "idle";
     }
+    applyPollInterval(cfg);
     clampToStage();
   }
 
@@ -298,29 +299,67 @@
     fetch("/api/pet/toggle", { method: "POST" }).then(pollState).catch(function () {});
   });
 
+  var pollTimer = null;
+  var pollMs = 250;
+  var es = null;
+  var esFailures = 0;
+
+  function applyState(s) {
+    if (!s) return;
+    pet.remoteOverride = s.animation || null;
+    if (s.message && s.message !== remoteMessage) {
+      remoteMessage = s.message;
+      setBubble(s.message, 4000);
+    }
+    if (!s.message) remoteMessage = null;
+    btnToggle.textContent = s.running ? "收回桌宠" : "召唤桌宠";
+    statusEl.textContent = (s.running ? "桌面运行中" : "未召唤") +
+      (s.activity === "working" ? " · agent 工作中 🛠" : "") +
+      (s.crashed ? " · 扩展异常已自愈" : "");
+  }
+
   function pollState() {
     fetch("/api/state", { cache: "no-store" })
       .then(function (r) { return r.json(); })
-      .then(function (s) {
-        pet.remoteOverride = s.animation || null;
-        if (s.message && s.message !== remoteMessage) {
-          remoteMessage = s.message;
-          setBubble(s.message, 4000);
-        }
-        if (!s.message) remoteMessage = null;
-        btnToggle.textContent = s.running ? "收回桌宠" : "召唤桌宠";
-        statusEl.textContent = (s.running ? "桌面运行中" : "未召唤") +
-          (s.activity === "working" ? " · agent 工作中 🛠" : "");
-      })
+      .then(applyState)
       .catch(function () {});
+  }
+
+  // 状态推送：SSE 可用时毫秒级收到 working/idle/说话；连不上就退回轮询
+  function connectEvents() {
+    closeEvents();
+    if (typeof EventSource !== "function") return;
+    try { es = new EventSource("/api/events"); } catch (e) { es = null; return; }
+    es.addEventListener("state", function (e) {
+      try { applyState(JSON.parse(e.data)); } catch (err) {}
+    });
+    es.onerror = function () {
+      esFailures += 1;
+      if (esFailures >= 3) closeEvents();   // 一直连不上就不再重连，交给轮询兜底
+    };
+  }
+
+  function closeEvents() {
+    if (es) { try { es.close(); } catch (e) {} es = null; }
+  }
+
+  function applyPollInterval(cfg) {
+    var ms = Number(cfg && cfg.pollIntervalMs);
+    if (!isFinite(ms) || ms <= 0) ms = 250;
+    ms = Math.min(5000, Math.max(100, Math.round(ms)));
+    if (pollTimer && ms === pollMs) return;
+    pollMs = ms;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollState, pollMs);
   }
 
   window.addEventListener("resize", clampToStage);
 
   loadConfig();
   setInterval(loadConfig, 4000);
-  setInterval(pollState, 800);
+  applyPollInterval(null);
   pollState();
+  connectEvents();
   requestAnimationFrame(tick);
 })();
 </script>

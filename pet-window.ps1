@@ -35,6 +35,26 @@ $script:spriteH = $script:fh * $script:scale
 $script:bubbleH = 64
 $script:spriteBaseTop = $script:bubbleH
 
+# ---- 轮询间隔（pet.json 的 pollIntervalMs，clamp 100..5000，默认 250） ----
+function Get-PollIntervalMs {
+    $ms = 250
+    try {
+        if ($null -ne $script:cfg.pollIntervalMs) { $ms = [int]$script:cfg.pollIntervalMs }
+    } catch {}
+    if ($ms -lt 100) { $ms = 100 }      # 下限：再快没有意义，只会空转
+    if ($ms -gt 5000) { $ms = 5000 }    # 上限：配置写错也不至于把服务打爆
+    return $ms
+}
+$script:pollMs = Get-PollIntervalMs
+
+# 实际生效间隔 = 配置间隔 与「连接中断」退避值 的较大者（断连期间自动降频）
+function Update-PollInterval {
+    $ms = $script:pollMs
+    if (-not $script:pollOk -and $script:backoffMs -gt $ms) { $ms = $script:backoffMs }
+    if ($ms -lt 100) { $ms = 100 }
+    $pollTimer.Interval = [TimeSpan]::FromMilliseconds($ms)
+}
+
 function Load-Bitmap([string]$file) {
     $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
     $bmp.BeginInit()
@@ -108,6 +128,10 @@ $script:lastInteraction = Get-Date
 $script:nextDecision = (Get-Date).AddSeconds(3)
 $script:failCount = 0
 $script:pollCount = 0
+# 「连接中断」保活态：连续失败不再关窗自杀，只降频重试 + 气泡提示一次
+$script:pollOk = $true
+$script:backoffMs = 250            # 断连退避：250 → 500 → 1000 → 2000 → 5000（封顶）
+$script:disconnNotified = $false   # 同一段断连只提示一次
 $script:configWriteTime = (Get-Item $script:configPath).LastWriteTime
 $script:autoWander = $true
 try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
@@ -264,7 +288,7 @@ $animTimer.Add_Tick({
 
 # ---- 指令轮询（agent 动作 / 配置热更新 / 保活） ----
 $pollTimer = New-Object System.Windows.Threading.DispatcherTimer
-$pollTimer.Interval = [TimeSpan]::FromMilliseconds(900)
+$pollTimer.Interval = [TimeSpan]::FromMilliseconds($script:pollMs)
 $pollTimer.Add_Tick({
     $script:pollCount += 1
 
@@ -288,15 +312,28 @@ $pollTimer.Add_Tick({
                     $script:cfg = $newCfg
                     if ($geomChanged) { Update-Geometry }
                     try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
+                    # 配置热重载：pollIntervalMs 变化时同步 DispatcherTimer 间隔
+                    $newPollMs = Get-PollIntervalMs
+                    if ($newPollMs -ne $script:pollMs) {
+                        $script:pollMs = $newPollMs
+                        Update-PollInterval
+                    }
                 }
             }
         } catch {}
     }
 
-    if ($StateUrl -eq "") { return }   # 独立模式：不联动会话状态，也不因连不上服务自杀
+    if ($StateUrl -eq "") { return }   # 独立模式：不轮询、不退出（进程常驻）
     try {
         $s = Invoke-RestMethod -Uri ($StateUrl + "api/state") -Method Get -TimeoutSec 2
         $script:failCount = 0
+        if (-not $script:pollOk) {
+            # 服务恢复：回到正常态，退避与「只提示一次」标记一起复位
+            $script:pollOk = $true
+            $script:backoffMs = 250
+            $script:disconnNotified = $false
+            Update-PollInterval
+        }
         if ($s.animation) { $script:overrideAnim = [string]$s.animation } else { $script:overrideAnim = $null }
         if ($s.message) {
             $msg = [string]$s.message
@@ -314,8 +351,22 @@ $pollTimer.Add_Tick({
             $badge.Visibility = "Collapsed"
         }
     } catch {
+        # 连接中断：绝不关窗自杀（原 failCount>=10 的自动退出已删除），进程始终不退，只降频重试
         $script:failCount += 1
-        if ($script:failCount -ge 10) { $window.Close() }   # 扩展已退出 → 自杀
+        if ($script:pollOk) {
+            $script:pollOk = $false
+            $script:backoffMs = 250
+            if (-not $script:disconnNotified) {
+                $script:disconnNotified = $true
+                Show-Bubble "连接中断，正在等待桌宠服务恢复……" 4500
+            }
+        } else {
+            # 指数退避：250 → 500 → 1000 → 2000 → 5000（封顶）
+            $next = $script:backoffMs * 2
+            if ($next -gt 5000) { $next = 5000 }
+            $script:backoffMs = $next
+        }
+        Update-PollInterval
     }
 })
 
