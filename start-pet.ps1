@@ -81,5 +81,5 @@ if (-not (Test-Path $win)) {
     exit 1
 }
 Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $win
-Write-Host '桌宠已召唤（独立模式，不联动会话状态）。' -ForegroundColor Green
+Write-Host '桌宠已召唤（独立模式：检测 Copilot App 运行并读取会话事件联动状态）。' -ForegroundColor Green
 exit 0

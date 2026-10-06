@@ -34,7 +34,9 @@
 
 手动启动：**双击 `start-pet.bat`**（或 `powershell -File start-pet.ps1`）。
 脚本会自动判断：已经在跑就提示不重复召唤；有 Copilot 会话加载了扩展就让该实例召唤
-（联动会话状态）；都没有则独立模式直接拉起 `pet-window.ps1`（不联动会话状态）。
+（联动会话状态）；都没有则独立模式直接拉起 `pet-window.ps1`——独立模式同样联动：
+本地检测 GitHub Copilot App 是否运行，并读取各会话 `events.jsonl` 的近期写入判断 working/idle
+（与扩展的事件日志兜底同口径，见下文「状态判定原理」第 3 条）。
 
 桌面上：
 
@@ -201,6 +203,9 @@ tests/           零依赖测试（node --test）
 3. **事件日志兜底**（`source: events-log`）：没加载扩展的会话（比如工作树里、其他仓库里的会话），
    检查 `~/.copilot/session-state/<会话>/events.jsonl` 最近 6 秒内是否有写入——有就是在干活，
    所以其他会话跑任务时你的桌宠照样敲电脑。
+   **独立模式**（无扩展实例、直接启动 `pet-window.ps1`）由桌面窗自己按同一口径检测：
+   先确认 GitHub Copilot App 在本机运行（进程或会话状态目录存在），再扫描各会话 `events.jsonl`
+   的近期写入，约 1 秒刷新一次 working/idle。
 4. **外部推送**（`source: self`）：`POST /api/working` / `POST /api/idle`，见上文「外部事件监听」。
 
 ### 开发与测试

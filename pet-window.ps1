@@ -1,6 +1,7 @@
 ﻿# desktop-pet 桌面悬浮窗（WPF 透明置顶窗，类 Codex 桌宠）
 # 由 extension.mjs 拉起：powershell -STA -File pet-window.ps1 -ExtDir <dir> -StateUrl <url>
-# 也可直接双击/手动运行（不带参数）：ExtDir 默认脚本所在目录，StateUrl 为空则独立模式（不联动会话状态）
+# 也可直接双击/手动运行（不带参数）：ExtDir 默认脚本所在目录，StateUrl 为空则独立模式——
+# 独立模式同样联动会话状态：检测 GitHub Copilot App 是否运行，并读取各会话 events.jsonl 的近期写入判断 working/idle
 param(
     [string]$ExtDir = $PSScriptRoot,
     [string]$StateUrl = ""
@@ -136,6 +137,47 @@ $script:configWriteTime = (Get-Item $script:configPath).LastWriteTime
 $script:autoWander = $true
 try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
 $script:downPos = New-Object System.Drawing.Point(0, 0)
+
+# ---- 独立模式联动：检测 Copilot App 运行 + 读取会话事件日志活跃度 ----
+# 与 extension.mjs 的 anySessionActive / ACTIVE_WINDOW_MS 同口径：
+# ~/.copilot/session-state/<会话>/events.jsonl 最近 6 秒内有写入即视为「有会话在干活」
+$script:sessionStateDir = Join-Path $env:USERPROFILE ".copilot\session-state"
+$script:activeWindowMs = 6000
+$script:copilotProcNames = @("copilot", "Copilot", "github-copilot", "GitHub Copilot")
+
+function Test-CopilotAppRunning {
+    foreach ($name in $script:copilotProcNames) {
+        if (Get-Process -Name $name -ErrorAction SilentlyContinue) { return $true }
+    }
+    # 会话状态目录存在也算 Copilot 在本机运行的证据（CLI 会话进程名不一定是 copilot）
+    return (Test-Path $script:sessionStateDir)
+}
+
+function Test-CopilotSessionActive {
+    if (-not (Test-Path $script:sessionStateDir)) { return $false }
+    $now = Get-Date
+    foreach ($dir in (Get-ChildItem $script:sessionStateDir -Directory -ErrorAction SilentlyContinue)) {
+        try {
+            $item = Get-Item (Join-Path $dir.FullName "events.jsonl") -ErrorAction Stop
+            if (($now - $item.LastWriteTime).TotalMilliseconds -lt $script:activeWindowMs) { return $true }
+        } catch {}
+    }
+    return $false
+}
+
+# 独立模式轮询：App 未运行 → idle；运行且任一会话事件近期有写入 → working
+function Update-StandaloneActivity {
+    $sessionActive = (Test-CopilotAppRunning) -and (Test-CopilotSessionActive)
+    if ($sessionActive) {
+        $script:activity = "working"
+        $badge.Visibility = "Visible"
+        if ($script:mode -eq "sleep") { $script:mode = "idle"; $script:lastInteraction = Get-Date }
+        if ($script:mode -eq "walk") { $script:mode = "idle" }
+    } else {
+        $script:activity = "idle"
+        $badge.Visibility = "Collapsed"
+    }
+}
 
 $wa = [System.Windows.SystemParameters]::WorkArea
 $window.Left = $wa.Right - $window.Width - 60
@@ -323,7 +365,11 @@ $pollTimer.Add_Tick({
         } catch {}
     }
 
-    if ($StateUrl -eq "") { return }   # 独立模式：不轮询、不退出（进程常驻）
+    if ($StateUrl -eq "") {
+        # 独立模式：不连扩展服务、进程常驻；约 1 秒一次本地检测 Copilot App 与会话事件，联动 working/idle
+        if ($script:pollCount % 4 -eq 2) { Update-StandaloneActivity }
+        return
+    }
     try {
         $s = Invoke-RestMethod -Uri ($StateUrl + "api/state") -Method Get -TimeoutSec 2
         $script:failCount = 0
