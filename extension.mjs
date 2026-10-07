@@ -21,8 +21,12 @@ import {
     DEFAULT_CONFIG,
     EXPLICIT_IDLE_SUPPRESS_MS,
     WORK_EVENTS,
+    TOOL_EVENTS,
+    THINKING_EVENTS,
     DONE_PHRASES,
     CRASH_PHRASES,
+    ABORT_PHRASES,
+    ERROR_PHRASES,
     clampPollMs,
     mergeConfig,
     createPetState,
@@ -33,7 +37,13 @@ import {
     say,
     visibleMessage,
     setAnimation,
+    setLookAtMouse,
+    setWorkPhase,
+    resolveAnimAlias,
     pickPhrase,
+    buildChatPrompt,
+    truncateForBubble,
+    normalizeChatText,
 } from "./state.mjs";
 
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -273,7 +283,8 @@ async function activatePet(id) {
 // ---- 桌宠共享状态（桌面窗与面板轮询/订阅获取） ----
 const petState = createPetState(Date.now());
 
-let reviewToken = null;
+// 特殊动画（思考/复盘/被打断/报错）的「还是当初那次覆盖」令牌
+let animToken = null;
 let crashTimes = [];
 let petProc = null;
 let serverEntry = null;
@@ -372,6 +383,8 @@ async function buildState() {
         message: visibleMessage(petState, now),
         activity: active.activity,
         activitySource: active.source,
+        workPhase: petState.workPhase,
+        lookAtMouse: !!petState.lookAtMouse,
         running: isPetRunning() || !!foreignPet,
         sessions: entries.length,
         crashed: petState.crashed,
@@ -490,8 +503,59 @@ function petSetAnimation(anim, config) {
     return r;
 }
 
-function onWorkEvent() {
+// 看着鼠标：桌面窗据此让桌宠朝光标方向转头
+function petLookAtMouse(enabled) {
+    const r = setLookAtMouse(petState, enabled);
+    broadcastState();
+    return r;
+}
+
+// ---- 聊天：消息发给当前 Copilot 会话，回复由桌宠说出来 ----
+let chatBusy = false;
+
+function chatOfflineReply(config) {
+    const list = (config.chat && config.chat.offlineReplies) || [];
+    return Array.isArray(list) && list.length ? pickPhrase(list) : null;
+}
+
+async function petChat(text) {
+    const { config } = await readConfig(false);
+    const norm = normalizeChatText(text, config);
+    if (!norm.ok) return { ok: false, status: 400, error: norm.error };
+    if (chatBusy) return { ok: false, status: 429, error: "上一条消息还在想，稍等一下下～" };
+
+    const send = sessionRef && typeof sessionRef.sendAndWait === "function" ? sessionRef.sendAndWait.bind(sessionRef) : null;
+    if (!send) {
+        const fallback = chatOfflineReply(config);
+        if (fallback) petSay(fallback, 6);
+        return { ok: false, status: 503, error: "当前会话不支持聊天", offline: true, reply: fallback || undefined };
+    }
+
+    const timeoutMs = Number(config.chat && config.chat.timeoutMs) > 0
+        ? Number(config.chat.timeoutMs) : DEFAULT_CONFIG.chat.timeoutMs;
+    chatBusy = true;
+    try {
+        const reply = await send({ prompt: buildChatPrompt(norm.text, config) }, timeoutMs);
+        const answer = String((reply && reply.data && reply.data.content) || "").trim();
+        if (!answer) {
+            const fallback = chatOfflineReply(config);
+            if (fallback) petSay(fallback, 6);
+            return { ok: false, status: 504, error: "没有收到回复", reply: fallback || undefined };
+        }
+        petSay(truncateForBubble(answer), 8);
+        return { ok: true, reply: answer };
+    } catch (err) {
+        const fallback = chatOfflineReply(config);
+        if (fallback) petSay(fallback, 6);
+        return { ok: false, status: 504, error: err && err.message ? err.message : String(err), reply: fallback || undefined };
+    } finally {
+        chatBusy = false;
+    }
+}
+
+function onWorkEvent(phase) {
     markWorking(petState, Date.now());
+    setWorkPhase(petState, phase || null);
     broadcastState();
 }
 
@@ -499,6 +563,23 @@ function onIdle() {
     const { wasWorking } = markIdle(petState, Date.now(), { suppressMs: EXPLICIT_IDLE_SUPPRESS_MS });
     broadcastState();
     return wasWorking;
+}
+
+// 特殊动画（思考/被打断/报错等）：按别名找配置里存在的动画，播一会儿再回到自动行为
+function playSpecialAnimation(kind, config, ms) {
+    const name = resolveAnimAlias(kind, config);
+    if (!name) return null;
+    petState.animation = name;
+    const token = (animToken = {});
+    setTimeout(() => {
+        // 只有「还是当初那次覆盖」时才清空，避免误清后面来的新动画
+        if (animToken === token && petState.animation === name) {
+            petState.animation = null;
+            broadcastState();
+        }
+    }, ms).unref?.();
+    broadcastState();
+    return name;
 }
 
 // ---- 崩溃自愈：异常不退出进程，先把「崩溃了」演出来，再恢复 ----
@@ -511,13 +592,15 @@ function handleCrash(kind, err) {
         if (sessionRef) sessionRef.log("桌宠扩展捕获到 " + kind + "：" + String(detail).split("\n")[0]);
         const wasRunning = isPetRunning();
         petState.crashed = true;
-        petState.animation = "failed";     // 没有 failed 动画时桌面窗会自动回退
+        // 优先用配置里存在的「报错」动画（error / failed / crash），都没有则回退自动行为
+        const crashAnim = resolveAnimAlias("error", configCache.config) || "failed";
+        petState.animation = crashAnim;
         say(petState, pickPhrase(CRASH_PHRASES), 6, now);
         broadcastState();
         setTimeout(() => {
             try {
                 petState.crashed = false;
-                if (petState.animation === "failed") petState.animation = null;
+                if (petState.animation === crashAnim) petState.animation = null;
                 if (wasRunning && !isPetRunning()) startDesktopPet().catch(() => {});
                 if (crashTimes.length >= CRASH_TRIPLE) {
                     // 连续崩溃：记录并复位计数，进程保持存活（绝不因异常退出）
@@ -641,6 +724,21 @@ async function startServer() {
                 const { config } = await readConfig(false);
                 const r = petSetAnimation(body.animation, config);
                 sendJson(res, r, r.ok ? 200 : 400);
+                return;
+            }
+            // 聊天：把消息发给当前 Copilot 会话，回复由桌宠说出来
+            if (p === "/api/chat" && isPost) {
+                const body = parseBody(await readBody(req));
+                if (body === null) { sendJson(res, { ok: false, error: "invalid json" }, 400); return; }
+                const r = await petChat(body.text != null ? body.text : body.message);
+                sendJson(res, r, r.ok ? 200 : (r.status || 500));
+                return;
+            }
+            // 看着鼠标：body.enabled 缺省即取反
+            if (p === "/api/look_at_mouse" && isPost) {
+                const body = parseBody(await readBody(req));
+                if (body === null) { sendJson(res, { ok: false, error: "invalid json" }, 400); return; }
+                sendJson(res, petLookAtMouse(body.enabled));
                 return;
             }
             if (p === "/api/reload" && isPost) {
@@ -782,6 +880,20 @@ const session = await joinSession({
             },
         },
         {
+            name: "desktop_pet_look_at_mouse",
+            description: "让桌宠看着当前鼠标位置（转头跟随光标），可开启/关闭/切换。",
+            parameters: {
+                type: "object",
+                properties: {
+                    enabled: { type: "boolean", description: "true 开启，false 关闭，省略则切换" },
+                },
+            },
+            handler: async (args) => {
+                const r = petLookAtMouse(args && args.enabled);
+                return r.lookAtMouse ? "桌宠开始盯着鼠标看了。" : "桌宠不再看鼠标了。";
+            },
+        },
+        {
             name: "desktop_pet_reload",
             description: "重新读取 pet.json 配置（贴图/动画/行为热更新）。",
             parameters: { type: "object", properties: {} },
@@ -835,6 +947,25 @@ const session = await joinSession({
                     },
                 },
                 {
+                    name: "look_at_mouse",
+                    description: "让桌宠看着鼠标（省略 enabled 即切换）",
+                    inputSchema: {
+                        type: "object",
+                        properties: { enabled: { type: "boolean" } },
+                    },
+                    handler: async (ctx) => petLookAtMouse(ctx.input && ctx.input.enabled),
+                },
+                {
+                    name: "chat",
+                    description: "和桌宠聊天，回复由桌宠说出来",
+                    inputSchema: {
+                        type: "object",
+                        properties: { text: { type: "string" } },
+                        required: ["text"],
+                    },
+                    handler: async (ctx) => await petChat(ctx.input && ctx.input.text),
+                },
+                {
                     name: "reload_config",
                     description: "重读 pet.json 配置",
                     inputSchema: { type: "object", properties: {} },
@@ -854,28 +985,42 @@ sessionRef = session;
 
 // ---- 会话事件 → 桌宠状态联动（类似 Codex companion 的反应） ----
 // 工作信号：立刻置 working（毫秒级），不再等桌面窗下一轮心跳/日志扫描
+// 顺手细分阶段：跑工具 = tool，其余（推理中/刚收到消息） = thinking
 for (const ev of WORK_EVENTS) {
-    try { session.on(ev, onWorkEvent); } catch {}
+    const phase = TOOL_EVENTS.includes(ev) ? "tool" : (THINKING_EVENTS.includes(ev) ? "thinking" : null);
+    try { session.on(ev, () => onWorkEvent(phase)); } catch {}
 }
 // session.idle：agent 收工的权威信号，立刻置 idle，并抑制事件日志兜底把状态拉回 working
-session.on("session.idle", (event) => {
+session.on("session.idle", async (event) => {
     const wasWorking = onIdle();
-    if (wasWorking && isPetRunning() && !(event && event.data && event.data.aborted)) {
-        petSay(pickPhrase(DONE_PHRASES), 4);
-        if (!petState.animation) {
-            petState.animation = "review";
-            const token = (reviewToken = {});
-            setTimeout(() => {
-                // 只有「还是当初那次 review 覆盖」时才清空，避免误清新动画
-                if (reviewToken === token && petState.animation === "review") {
-                    petState.animation = null;
-                    broadcastState();
-                }
-            }, 6000).unref?.();
-            broadcastState();
+    const aborted = !!(event && event.data && event.data.aborted);
+    const { config } = await readConfig(false);
+    if (aborted) {
+        // 主动结束（用户点了停止 / 打断）：演一个「被打断」的收场，别和正常完成混在一起
+        if (isPetRunning()) {
+            petSay(pickPhrase(ABORT_PHRASES), 4);
+            if (!petState.animation) playSpecialAnimation("aborted", config, 5000);
         }
+        return;
+    }
+    if (wasWorking && isPetRunning()) {
+        petSay(pickPhrase(DONE_PHRASES), 4);
+        if (!petState.animation) playSpecialAnimation("review", config, 6000);
     }
 });
+// session.error：异常结束，和主动结束分开演（都优先于「做完了」的复盘）
+try {
+    session.on("session.error", async () => {
+        markIdle(petState, Date.now(), { suppressMs: EXPLICIT_IDLE_SUPPRESS_MS });
+        const { config } = await readConfig(false);
+        if (isPetRunning()) {
+            petSay(pickPhrase(ERROR_PHRASES), 5);
+            playSpecialAnimation("error", config, 6000);
+        } else {
+            broadcastState();
+        }
+    });
+} catch {}
 
 // ---- 启动本地服务并注册清理 ----
 serverEntry = await startServer();

@@ -2,7 +2,7 @@
 // 1) 把仓库文件复制到临时目录，并在那里生成 @github/copilot-sdk stub（仓库本地没有该包）
 // 2) 选空闲端口 / 隔离 TEMP 与 USERPROFILE（心跳注册表 + session-state 都落在沙箱内）/ spawn extension.mjs
 // 3) 等待 HTTP 就绪、HTTP/SSE 小工具、进程与临时目录清理
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import http from "node:http";
@@ -13,14 +13,87 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_DIR = path.resolve(HERE, "..");
 
-// NOTES-contract.md §7 给出的 stub 形状
+// NOTES-contract.md §7 给出的 stub 形状；额外加两件测试能力：
+// 1) on() 真注册处理器，并可被 PET_TEST_EVENTS_FILE 里逐行追加的 {event,data} 触发
+// 2) sendAndWait() 的回复/报错/延迟/提示词留档由 PET_TEST_CHAT_* 环境变量控制
 const SDK_STUB = [
-    "export function joinSession(opts) { return { on() {}, log: async () => {}, tools: opts.tools, canvases: opts.canvases }; }",
+    'import { appendFileSync, readFileSync } from "node:fs";',
+    "",
+    "const handlers = new Map();",
+    "let controlTimer = null;",
+    "let controlSeen = 0;",
+    "",
+    "function emit(name, data) {",
+    "    for (const cb of handlers.get(name) || []) { try { cb(data); } catch (e) { /* 测试里忽略 */ } }",
+    "}",
+    "",
+    "// 测试用控制通道：向 PET_TEST_EVENTS_FILE 逐行追加 {\"event\":..,\"data\":..} 即可驱动会话事件",
+    "function watchControlFile() {",
+    "    const file = process.env.PET_TEST_EVENTS_FILE;",
+    "    if (!file || controlTimer) return;",
+    "    controlTimer = setInterval(() => {",
+    "        let lines;",
+    "        try { lines = readFileSync(file, \"utf8\").split(/\\r?\\n/).filter(Boolean); }",
+    "        catch (e) { return; }",
+    "        for (; controlSeen < lines.length; controlSeen++) {",
+    "            let msg;",
+    "            try { msg = JSON.parse(lines[controlSeen]); } catch (e) { continue; }",
+    "            if (msg && msg.event) emit(msg.event, msg.data === undefined ? {} : msg.data);",
+    "        }",
+    "    }, 60);",
+    "    if (controlTimer.unref) controlTimer.unref();",
+    "}",
+    "",
+    "async function sendAndWait(options, timeout) {",
+    "    const logFile = process.env.PET_TEST_CHAT_LOG;",
+    "    if (logFile) appendFileSync(logFile, JSON.stringify({ options: options, timeout: timeout }) + \"\\n\");",
+    "    const delay = Number(process.env.PET_TEST_CHAT_DELAY_MS || 0);",
+    "    if (delay > 0) await new Promise((r) => setTimeout(r, delay));",
+    "    if (process.env.PET_TEST_CHAT_THROW) throw new Error(process.env.PET_TEST_CHAT_THROW);",
+    "    const reply = process.env.PET_TEST_CHAT_REPLY;",
+    "    if (reply === \"__EMPTY__\") return { type: \"assistant.message\", data: { content: \"   \" } };",
+    "    return { type: \"assistant.message\", data: { content: reply === undefined ? \"我是桌宠，你好呀。\" : reply } };",
+    "}",
+    "",
+    "export function joinSession(opts) {",
+    "    watchControlFile();",
+    "    return {",
+    "        on(name, cb) {",
+    "            if (!handlers.has(name)) handlers.set(name, []);",
+    "            handlers.get(name).push(cb);",
+    "        },",
+    "        sendAndWait: sendAndWait,",
+    "        log: async () => {},",
+    "        tools: opts.tools,",
+    "        canvases: opts.canvases,",
+    "    };",
+    "}",
     "export function createCanvas(o) { return o; }",
     "",
 ].join("\n");
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 测试用控制通道路径：SDK stub 会监听这个文件里逐行追加的 {event,data} */
+export function sdkEventFile(dir) {
+    return path.join(dir, "tmp", "sdk-events.jsonl");
+}
+
+/** 向 stub 追加一条会话事件（模拟 Copilot 会话事件） */
+export async function emitSessionEvent(dir, event, data) {
+    await appendFile(sdkEventFile(dir), JSON.stringify({ event: event, data: data === undefined ? {} : data }) + "\n");
+}
+
+/** 读取 stub 记下的聊天提示词（PET_TEST_CHAT_LOG） */
+export async function readChatLog(dir) {
+    try {
+        const text = await readFile(path.join(dir, "tmp", "chat-log.jsonl"), "utf8");
+        return text.split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+    } catch (err) {
+        if (err.code === "ENOENT") return [];
+        throw err;
+    }
+}
 
 /** 取一个当前空闲的 TCP 端口（先 listen(0) 再关闭，存在极小竞态） */
 export function freePort() {

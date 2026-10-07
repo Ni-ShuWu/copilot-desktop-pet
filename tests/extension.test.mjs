@@ -6,7 +6,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { makeSandbox, startExtension, freePort, openSSE, waitFor, sleep } from "./helpers.mjs";
+import { makeSandbox, startExtension, freePort, openSSE, waitFor, sleep, sdkEventFile, emitSessionEvent, readChatLog } from "./helpers.mjs";
 
 const BASE_PET = {
     name: "测试桌宠",
@@ -32,7 +32,12 @@ async function boot(t, opts) {
     try {
         ext = await startExtension({
             dir: sb.dir,
-            env: Object.assign({ PET_HTTP_PORT: String(port) }, o.env || {}),
+            env: Object.assign({
+                PET_HTTP_PORT: String(port),
+                // 让 SDK stub 的会话事件控制通道与聊天留档都落在沙箱内
+                PET_TEST_EVENTS_FILE: sdkEventFile(sb.dir),
+                PET_TEST_CHAT_LOG: path.join(sb.dir, "tmp", "chat-log.jsonl"),
+            }, o.env || {}),
         });
     } catch (err) {
         await sb.cleanup();
@@ -408,4 +413,178 @@ test("13. 启动时将旧宠物库无覆盖迁移至 AppData", async (t) => {
     assert.equal((await ext.request("GET", "/api/pets")).json.pets[0].id, legacyId);
     assert.equal((await ext.request("GET", "/pets/" + legacyId + "/legacy.png")).status, 200);
     assert.equal((await ext.request("GET", "/legacy.png")).status, 200);
+});
+
+test("14. POST /api/look_at_mouse：显式开关、缺省取反、状态与 SSE 同步", async (t) => {
+    const ext = await boot(t, {});
+
+    assert.equal((await ext.request("GET", "/api/state")).json.lookAtMouse, false, "默认不看鼠标");
+
+    const on = await ext.request("POST", "/api/look_at_mouse", { body: { enabled: true } });
+    assert.equal(on.status, 200);
+    assert.deepEqual(on.json, { ok: true, lookAtMouse: true });
+    assert.equal((await ext.request("GET", "/api/state")).json.lookAtMouse, true);
+
+    const sse = await openSSE(ext.port);
+    t.after(() => sse.close());
+    await sse.waitForEvent((e) => e.event === "state", 5000);
+
+    const off = await ext.request("POST", "/api/look_at_mouse", { body: { enabled: false } });
+    assert.deepEqual(off.json, { ok: true, lookAtMouse: false });
+    const pushed = await sse.waitForEvent((e) => e.event === "state" && e.parsed && e.parsed.lookAtMouse === false, 8000);
+    assert.equal(pushed[0].parsed.lookAtMouse, false);
+
+    // 缺省 enabled 即取反（右键菜单的「开/关」一键切换）
+    const toggled = await ext.request("POST", "/api/look_at_mouse", { body: {} });
+    assert.deepEqual(toggled.json, { ok: true, lookAtMouse: true });
+    const again = await ext.request("POST", "/api/look_at_mouse", { body: {} });
+    assert.deepEqual(again.json, { ok: true, lookAtMouse: false });
+
+    const bad = await ext.request("POST", "/api/look_at_mouse", { body: "{" });
+    assert.equal(bad.status, 400);
+});
+
+test("15. POST /api/chat：回复由桌宠说出来，提示词带人设且不改文件", async (t) => {
+    const ext = await boot(t, { env: { PET_TEST_CHAT_REPLY: "我在的，今天想聊点什么？" } });
+
+    const empty = await ext.request("POST", "/api/chat", { body: { text: "   " } });
+    assert.equal(empty.status, 400);
+    assert.equal(empty.json.ok, false);
+    assert.match(empty.json.error, /text/i);
+
+    const tooLong = await ext.request("POST", "/api/chat", { body: { text: "啊".repeat(2001) } });
+    assert.equal(tooLong.status, 400);
+    assert.match(tooLong.json.error, /太长/);
+
+    const ok = await ext.request("POST", "/api/chat", { body: { text: "你在干嘛？" } });
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.json.ok, true);
+    assert.equal(ok.json.reply, "我在的，今天想聊点什么？");
+    assert.equal((await ext.request("GET", "/api/state")).json.message, "我在的，今天想聊点什么？");
+
+    // message 字段是 text 的别名，桌面窗和画布都能用
+    const alias = await ext.request("POST", "/api/chat", { body: { message: "再问一次" } });
+    assert.equal(alias.status, 200);
+
+    const log = await readChatLog(ext.dir);
+    assert.equal(log.length, 2);
+    const prompt = log[0].options.prompt;
+    assert.ok(prompt.includes("你在干嘛？"), "提示词必须带上用户原话");
+    assert.ok(prompt.includes("测试桌宠"), "提示词应带上桌宠名字");
+    assert.match(prompt, /不要调用任何工具/, "必须禁止聊天时动工具");
+    assert.match(prompt, /不要修改文件/, "必须禁止聊天时改文件");
+    assert.equal(typeof log[0].timeout, "number");
+    assert.ok(log[0].timeout > 0, "应把 chat.timeoutMs 传给 sendAndWait");
+});
+
+test("16. 聊天异常路径：超长回复截断、空回复 504、抛错 504 都回退到离线台词", async (t) => {
+    const offline = { chat: { offlineReplies: ["我现在连不上大脑，等下再聊～"], timeoutMs: 2000 } };
+
+    const long = await boot(t, { pet: Object.assign({}, BASE_PET, { chat: { maxChars: 2000 } }), env: { PET_TEST_CHAT_REPLY: "字".repeat(400) } });
+    const r1 = await long.request("POST", "/api/chat", { body: { text: "说长一点" } });
+    assert.equal(r1.status, 200);
+    assert.equal(r1.json.reply.length, 400, "接口返回完整回复");
+    const bubble = (await long.request("GET", "/api/state")).json.message;
+    assert.ok(bubble.length <= 161, "气泡必须截断，实际长度=" + bubble.length);
+    assert.ok(bubble.endsWith("…"));
+
+    const empty = await boot(t, { pet: Object.assign({}, BASE_PET, offline), env: { PET_TEST_CHAT_REPLY: "__EMPTY__" } });
+    const r2 = await empty.request("POST", "/api/chat", { body: { text: "在吗" } });
+    assert.equal(r2.status, 504);
+    assert.equal(r2.json.ok, false);
+    assert.equal(r2.json.reply, "我现在连不上大脑，等下再聊～");
+    assert.equal((await empty.request("GET", "/api/state")).json.message, "我现在连不上大脑，等下再聊～");
+
+    const boom = await boot(t, { pet: Object.assign({}, BASE_PET, offline), env: { PET_TEST_CHAT_THROW: "会话已经关了" } });
+    const r3 = await boom.request("POST", "/api/chat", { body: { text: "在吗" } });
+    assert.equal(r3.status, 504);
+    assert.match(r3.json.error, /会话已经关了/);
+    assert.equal((await boom.request("GET", "/api/state")).json.message, "我现在连不上大脑，等下再聊～");
+});
+
+test("17. 聊天并发：上一条还在想时第二条返回 429", async (t) => {
+    const ext = await boot(t, { env: { PET_TEST_CHAT_DELAY_MS: "900" } });
+    const first = ext.request("POST", "/api/chat", { body: { text: "第一个问题" } });
+    await sleep(200);
+    const second = await ext.request("POST", "/api/chat", { body: { text: "第二个问题" } });
+    assert.equal(second.status, 429);
+    assert.equal(second.json.ok, false);
+    const done = await first;
+    assert.equal(done.status, 200);
+
+    // 忙完后可以继续聊
+    const third = await ext.request("POST", "/api/chat", { body: { text: "第三个问题" } });
+    assert.equal(third.status, 200);
+});
+
+test("18. 会话事件 → workPhase：思考中/跑工具分开，idle 与 error 都清空", async (t) => {
+    const ext = await boot(t, {});
+
+    await emitSessionEvent(ext.dir, "assistant.reasoning", {});
+    const thinking = await waitFor(async () => {
+        const r = await ext.request("GET", "/api/state");
+        return r.json.activity === "working" && r.json.workPhase === "thinking" ? r.json : null;
+    }, { timeoutMs: 6000, intervalMs: 50, label: "working/thinking" });
+    assert.equal(thinking.workPhase, "thinking");
+
+    await emitSessionEvent(ext.dir, "tool.execution_start", {});
+    const tool = await waitFor(async () => {
+        const r = await ext.request("GET", "/api/state");
+        return r.json.workPhase === "tool" ? r.json : null;
+    }, { timeoutMs: 6000, intervalMs: 50, label: "workPhase=tool" });
+    assert.equal(tool.activity, "working");
+
+    await emitSessionEvent(ext.dir, "session.idle", { aborted: false });
+    const idle = await waitFor(async () => {
+        const r = await ext.request("GET", "/api/state");
+        return r.json.activity === "idle" ? r.json : null;
+    }, { timeoutMs: 6000, intervalMs: 50, label: "idle 清空 workPhase" });
+    assert.equal(idle.workPhase, null);
+
+    // 异常结束：同样立刻回到 idle，且不残留 workPhase
+    await emitSessionEvent(ext.dir, "assistant.turn_start", {});
+    await waitFor(async () => (await ext.request("GET", "/api/state")).json.activity === "working",
+        { timeoutMs: 6000, intervalMs: 50, label: "重新 working" });
+    await emitSessionEvent(ext.dir, "session.error", {});
+    const errored = await waitFor(async () => {
+        const r = await ext.request("GET", "/api/state");
+        return r.json.activity === "idle" ? r.json : null;
+    }, { timeoutMs: 6000, intervalMs: 50, label: "session.error → idle" });
+    assert.equal(errored.workPhase, null);
+});
+
+test("19. 特殊动画别名：崩溃演配置里的 error 动画（thinking/chat/look 等别名同理）", async (t) => {
+    const pet = Object.assign({}, BASE_PET, {
+        animations: Object.assign({}, BASE_PET.animations, {
+            error: { row: 3, frames: 2 },
+            thinking: { row: 4, frames: 2 },
+            chat: { row: 5, frames: 2 },
+            look: { row: 6, frames: 2 },
+        }),
+    });
+    const ext = await boot(t, { pet: pet, env: { PET_SIMULATE_CRASH_MS: "400" } });
+
+    const crashed = await waitFor(async () => {
+        const r = await ext.request("GET", "/api/state");
+        return r.json && r.json.crashed ? r.json : null;
+    }, { timeoutMs: 6000, intervalMs: 50, label: "crashed=true" });
+    assert.equal(crashed.animation, "error", "有 error 动画时不该再回退到 failed");
+
+    // 崩溃的动画不能赖着不走
+    const recovered = await waitFor(async () => {
+        const r = await ext.request("GET", "/api/state");
+        return r.json.crashed === false && r.json.animation === null ? r.json : null;
+    }, { timeoutMs: 12000, intervalMs: 100, label: "自愈并清空动画" });
+    assert.equal(recovered.crashed, false);
+
+    // 别名解析是配置驱动的：删掉 error 后崩溃回退到 failed
+    const fallbackPet = Object.assign({}, BASE_PET, {
+        animations: Object.assign({}, BASE_PET.animations, { failed: { row: 3, frames: 2 } }),
+    });
+    const ext2 = await boot(t, { pet: fallbackPet, env: { PET_SIMULATE_CRASH_MS: "400" } });
+    const crashed2 = await waitFor(async () => {
+        const r = await ext2.request("GET", "/api/state");
+        return r.json && r.json.crashed ? r.json : null;
+    }, { timeoutMs: 6000, intervalMs: 50, label: "crashed=true (failed 别名)" });
+    assert.equal(crashed2.animation, "failed");
 });

@@ -13,8 +13,15 @@ export const DEFAULT_CONFIG = {
     fps: 8,
     defaultAnimation: "idle",
     animations: { idle: { row: 0, frames: 4 } },
-    behavior: { autoWander: true, walkSpeedPxPerSec: 40, wanderIntervalSec: [3, 8], sleepAfterIdleSec: 45 },
+    behavior: { autoWander: true, walkSpeedPxPerSec: 40, wanderIntervalSec: [3, 8], sleepAfterIdleSec: 45, lookAtMouse: false },
     speech: { phrases: ["(◕‿◕)"], fontSize: 13 },
+    // 聊天：消息发给当前 Copilot 会话，回复由桌宠说出来
+    chat: {
+        persona: "",
+        timeoutMs: 60000,
+        maxChars: 2000,
+        offlineReplies: ["我现在连不上大脑（Copilot 会话），先陪我待会儿吧。"],
+    },
     pollIntervalMs: 250,
     // 外部事件监听：默认关闭。开启后可通过本机 HTTP 直接推送 working / idle，
     // 这样不装 Copilot 扩展（例如只用 PowerShell 启动）也能让桌宠联动。
@@ -31,8 +38,40 @@ export const WORK_EVENTS = [
     "assistant.reasoning", "tool.execution_start", "tool.execution_complete",
 ];
 
+// 「思考中」与「干工具活」的区分：同一批工作事件里，只有工具执行算 tool 阶段，
+// 其余（用户发话、模型开始/正在推理、工具跑完在琢磨结果）都算 thinking 阶段。
+export const TOOL_EVENTS = ["tool.execution_start"];
+export const THINKING_EVENTS = ["user.message", "assistant.turn_start", "assistant.message", "assistant.reasoning", "tool.execution_complete"];
+
 export const DONE_PHRASES = ["做完了。", "任务完成，去看看吧。", "嗯，都处理好了。", "收工。"];
 export const CRASH_PHRASES = ["哎呀，我摔了一跤……", "出了点状况，正在重启。", "别慌，我马上回来。"];
+// 主动结束（用户点停止/打断）与异常结束（会话报错）分开演，别让两种收场看起来一样
+export const ABORT_PHRASES = ["好，我停下来了。", "那我先不做了。", "听你的，收手。"];
+export const ERROR_PHRASES = ["出错了……我有点懵。", "这次没跑通，再看看日志？", "呜，报错了。"];
+
+// 特殊动画别名：pet.json 里用哪个名字都行，按顺序取第一个存在的
+export const ANIM_ALIASES = {
+    thinking: ["thinking", "think", "reasoning"],
+    tool: ["work", "typing", "busy"],
+    drag: ["drag", "grab", "lift"],
+    poke: ["poke", "tap", "hit"],
+    chat: ["chat", "talk", "talking"],
+    look: ["look", "stare", "watch"],
+    sleep: ["sleep", "rest"],
+    walk: ["walk"],
+    review: ["review", "done", "inspect"],
+    aborted: ["aborted", "stop", "cancel", "interrupted"],
+    error: ["error", "failed", "crash"],
+};
+
+// 聊天时给 Copilot 的桌宠人设：{name} 会替换成 pet.json 里的 name
+export const DEFAULT_CHAT_PERSONA =
+    "你是一只住在 Windows 桌面上的 2D 桌宠，名字叫「{name}」。"
+    + "用简短、可爱、口语化的中文回答，控制在 80 字以内；"
+    + "不要调用任何工具，不要修改文件或执行命令，只是聊天。";
+
+// 桌宠气泡能显示的字符数（聊天回复可能很长，气泡只放摘要）
+export const BUBBLE_TEXT_MAX = 160;
 
 const POLL_MIN_MS = 100;
 const POLL_MAX_MS = 5000;
@@ -49,6 +88,7 @@ export function mergeConfig(parsed) {
     const cfg = Object.assign({}, DEFAULT_CONFIG, src);
     cfg.behavior = Object.assign({}, DEFAULT_CONFIG.behavior, src.behavior || {});
     cfg.speech = Object.assign({}, DEFAULT_CONFIG.speech, src.speech || {});
+    cfg.chat = Object.assign({}, DEFAULT_CONFIG.chat, src.chat || {});
     cfg.externalEvents = Object.assign({}, DEFAULT_CONFIG.externalEvents, src.externalEvents || {});
     return cfg;
 }
@@ -61,6 +101,8 @@ export function createPetState(now) {
         activity: "idle",     // idle | working
         activityAt: now || 0,
         explicitIdleUntil: 0, // 兜底抑制截止时间戳
+        workPhase: null,      // working 期间的细分：thinking | tool
+        lookAtMouse: false,   // 看着鼠标模式（桌面窗据此让桌宠朝光标转头）
         crashed: false,
     };
 }
@@ -78,6 +120,7 @@ export function markIdle(state, now, opts) {
     state.activity = "idle";
     state.activityAt = now;
     state.crashed = false;
+    state.workPhase = null;
     const suppressMs = opts && Number(opts.suppressMs);
     if (Number.isFinite(suppressMs) && suppressMs > 0) state.explicitIdleUntil = now + suppressMs;
     return { wasWorking };
@@ -131,4 +174,53 @@ export function setAnimation(state, anim, config) {
 export function pickPhrase(list, random) {
     const rnd = typeof random === "function" ? random : Math.random;
     return list[Math.floor(rnd() * list.length)];
+}
+
+// 看着鼠标：不传 enabled（或传 null）即取反
+export function setLookAtMouse(state, enabled) {
+    state.lookAtMouse = (enabled === undefined || enabled === null) ? !state.lookAtMouse : !!enabled;
+    return { ok: true, lookAtMouse: state.lookAtMouse };
+}
+
+// working 细分阶段：thinking（模型在想）/ tool（在跑工具）
+export function setWorkPhase(state, phase) {
+    state.workPhase = (phase === "tool" || phase === "thinking") ? phase : null;
+    return state.workPhase;
+}
+
+// 按别名挑一个配置里真实存在的动画名；都不存在返回 null
+export function resolveAnimAlias(kind, config) {
+    const list = ANIM_ALIASES[kind];
+    if (!list) return null;
+    const anims = (config && config.animations) || {};
+    for (const name of list) {
+        if (anims[name]) return name;
+    }
+    return null;
+}
+
+// 把用户的聊天内容包成给 Copilot 的提示词（人设 + 用户原话）
+export function buildChatPrompt(text, config) {
+    const chat = (config && config.chat) || {};
+    const name = String((config && config.name) || DEFAULT_CONFIG.name);
+    const persona = String(chat.persona || DEFAULT_CHAT_PERSONA).replace(/\{name\}/g, name);
+    return persona + "\n\n用户说：" + String(text == null ? "" : text);
+}
+
+// 气泡只放得下摘要：压缩空白 + 超长截断加省略号
+export function truncateForBubble(text, max) {
+    const limit = Number(max) > 0 ? Math.floor(Number(max)) : BUBBLE_TEXT_MAX;
+    const s = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+    if (s.length <= limit) return s;
+    return s.slice(0, Math.max(1, limit - 1)) + "…";
+}
+
+// 聊天输入校验：返回 { ok, text } 或 { ok:false, error }
+export function normalizeChatText(text, config) {
+    const chat = (config && config.chat) || {};
+    const maxChars = Number(chat.maxChars) > 0 ? Math.floor(Number(chat.maxChars)) : DEFAULT_CONFIG.chat.maxChars;
+    const value = String(text == null ? "" : text).trim();
+    if (!value) return { ok: false, error: "text is required" };
+    if (value.length > maxChars) return { ok: false, error: "消息太长（最多 " + maxChars + " 字）" };
+    return { ok: true, text: value };
 }
