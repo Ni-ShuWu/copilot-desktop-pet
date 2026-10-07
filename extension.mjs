@@ -10,6 +10,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { readFile, stat, readdir, writeFile, mkdir, unlink, copyFile, rename } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { unlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,8 +37,10 @@ import {
 } from "./state.mjs";
 
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_FILE = path.join(EXT_DIR, "pet.json");
-const PET_LIBRARY_DIR = path.join(EXT_DIR, "pets");
+const USER_DATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "copilot-desktop-pet");
+const LEGACY_CONFIG_FILE = path.join(EXT_DIR, "pet.json");
+const CONFIG_FILE = path.join(USER_DATA_DIR, "pet.json");
+const PET_LIBRARY_DIR = path.join(USER_DATA_DIR, "pets");
 const ACTIVE_PET_FILE = path.join(PET_LIBRARY_DIR, "active.json");
 const HTML_FILE = path.join(EXT_DIR, "pet.html");
 const PS1_FILE = path.join(EXT_DIR, "pet-window.ps1");
@@ -59,8 +62,55 @@ let sessionRef = null;
 
 let configCache = { mtimeMs: -1, config: DEFAULT_CONFIG, error: null };
 
+async function copyDirectoryWithoutOverwrite(source, destination) {
+    let entries;
+    try { entries = await readdir(source, { withFileTypes: true }); }
+    catch (err) { if (err.code === "ENOENT") return; throw err; }
+    await mkdir(destination, { recursive: true });
+    for (const entry of entries) {
+        const from = path.join(source, entry.name);
+        const to = path.join(destination, entry.name);
+        if (entry.isDirectory()) {
+            await copyDirectoryWithoutOverwrite(from, to);
+        } else if (entry.isFile()) {
+            try { await copyFile(from, to, fsConstants.COPYFILE_EXCL); }
+            catch (err) { if (err.code !== "EEXIST") throw err; }
+        }
+    }
+}
+
+async function ensureUserData() {
+    await mkdir(PET_LIBRARY_DIR, { recursive: true });
+    let configExists = true;
+    try { await stat(CONFIG_FILE); } catch { configExists = false; }
+    if (!configExists) {
+        try { await copyFile(LEGACY_CONFIG_FILE, CONFIG_FILE, fsConstants.COPYFILE_EXCL); }
+        catch (err) {
+            if (err.code !== "EEXIST" && err.code !== "ENOENT") throw err;
+            if (err.code === "ENOENT") {
+                await writeFile(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2), { flag: "wx" }).catch((e) => {
+                    if (e.code !== "EEXIST") throw e;
+                });
+            }
+        }
+    }
+
+    const migrationMarker = path.join(USER_DATA_DIR, ".legacy-data-migrated");
+    try { await stat(migrationMarker); return; } catch {}
+    for (const entry of await readdir(EXT_DIR, { withFileTypes: true })) {
+        if (!entry.isFile() || !supportedSpriteExt(entry.name)) continue;
+        try { await copyFile(path.join(EXT_DIR, entry.name), path.join(USER_DATA_DIR, entry.name), fsConstants.COPYFILE_EXCL); }
+        catch (err) { if (err.code !== "EEXIST") throw err; }
+    }
+    await copyDirectoryWithoutOverwrite(path.join(EXT_DIR, "pets"), PET_LIBRARY_DIR);
+    await writeFile(migrationMarker, "", { flag: "wx" }).catch((err) => {
+        if (err.code !== "EEXIST") throw err;
+    });
+}
+
 async function readConfig(force) {
     try {
+        await ensureUserData();
         const st = await stat(CONFIG_FILE);
         if (force || st.mtimeMs !== configCache.mtimeMs) {
             const raw = await readFile(CONFIG_FILE, "utf8");
@@ -85,6 +135,24 @@ function petLibraryPath(id) {
 function supportedSpriteExt(filename) {
     const ext = path.extname(String(filename || "")).toLowerCase();
     return Object.prototype.hasOwnProperty.call(IMAGE_MIME, ext) ? ext : null;
+}
+
+async function resolveSpritePath(filename) {
+    const relative = String(filename || "").replace(/[\\/]+/g, path.sep);
+    if (!relative || path.isAbsolute(relative) || relative.split(path.sep).some((part) => !part || part === "." || part === "..")) return null;
+    const userPath = path.resolve(USER_DATA_DIR, relative);
+    if (!userPath.startsWith(path.resolve(USER_DATA_DIR) + path.sep)) return null;
+    try { await stat(userPath); return userPath; } catch {}
+    const petMatch = relative.match(/^pets[\\/]([0-9a-f-]{36})[\\/]([^\\/]+)$/i);
+    if (petMatch) {
+        const petDir = petLibraryPath(petMatch[1]);
+        const petSprite = path.join(petDir, path.basename(petMatch[2]));
+        try { await stat(petSprite); return petSprite; } catch {}
+    }
+    if (relative.includes(path.sep)) return null;
+    const extensionPath = path.join(EXT_DIR, relative);
+    try { await stat(extensionPath); return extensionPath; } catch {}
+    return null;
 }
 
 function matchesImageType(data, ext) {
@@ -131,18 +199,19 @@ async function saveCurrentPet() {
     if (error) return { ok: false, status: 400, error: "当前 pet.json 无法读取: " + error };
     const sprite = String(config.sprite || "");
     const ext = supportedSpriteExt(sprite);
-    if (!ext || path.basename(sprite) !== sprite) {
+    if (!ext) {
         return { ok: false, status: 400, error: "当前配置引用了不支持的贴图文件" };
     }
-    const spritePath = path.join(EXT_DIR, sprite);
-    try { await stat(spritePath); } catch { return { ok: false, status: 400, error: "找不到当前桌宠贴图: " + sprite }; }
+    const spritePath = await resolveSpritePath(sprite);
+    if (!spritePath) return { ok: false, status: 400, error: "找不到当前桌宠贴图: " + sprite };
 
     const id = randomUUID();
     const dir = petLibraryPath(id);
+    const libraryConfig = Object.assign({}, config, { sprite: path.basename(sprite) });
     await mkdir(dir, { recursive: true });
-    await copyFile(CONFIG_FILE, path.join(dir, "pet.json"));
-    await copyFile(spritePath, path.join(dir, sprite));
-    return { ok: true, pet: { id, name: String(config.name || "未命名桌宠"), sprite } };
+    await writeFile(path.join(dir, "pet.json"), JSON.stringify(libraryConfig, null, 2), "utf8");
+    await copyFile(spritePath, path.join(dir, path.basename(sprite)));
+    return { ok: true, pet: { id, name: String(config.name || "未命名桌宠"), sprite: path.basename(sprite) } };
 }
 
 async function importPet(body) {
@@ -191,9 +260,7 @@ async function activatePet(id) {
     try { await stat(path.join(dir, sprite)); }
     catch { return { ok: false, status: 404, error: "桌宠贴图文件不存在" }; }
 
-    const installedSprite = id + ext;
-    await copyFile(path.join(dir, sprite), path.join(EXT_DIR, installedSprite));
-    cfg.sprite = installedSprite;
+    cfg.sprite = path.join("pets", id, sprite);
     const tempConfig = CONFIG_FILE + "." + id + ".tmp";
     await writeFile(tempConfig, JSON.stringify(cfg, null, 2), "utf8");
     await rename(tempConfig, CONFIG_FILE);
@@ -389,6 +456,7 @@ async function startDesktopPet() {
         "-File", PS1_FILE,
         "-ExtDir", EXT_DIR,
         "-StateUrl", serverEntry.url,
+        "-DataDir", USER_DATA_DIR,
     ], { stdio: "ignore", windowsHide: true });
     petProc.on("exit", () => { petProc = null; });
     return { ok: true, pid: petProc.pid };
@@ -609,9 +677,16 @@ async function startServer() {
                 return;
             }
             const ext = path.extname(p).toLowerCase();
-            if (IMAGE_MIME[ext] && !p.includes("..")) {
+            if (IMAGE_MIME[ext]) {
                 try {
-                    const data = await readFile(path.join(EXT_DIR, path.basename(p)));
+                    const filename = decodeURIComponent(p.slice(1));
+                    if (path.extname(filename).toLowerCase() !== ext) throw new Error("image type mismatch");
+                    const petMatch = filename.match(/^pets[\\/]([0-9a-f-]{36})[\\/]([^\\/]+)$/i);
+                    const spritePath = petMatch
+                        ? path.join(petLibraryPath(petMatch[1]), path.basename(petMatch[2]))
+                        : await resolveSpritePath(filename);
+                    if (!spritePath) throw new Error("sprite not found");
+                    const data = await readFile(spritePath);
                     res.setHeader("Content-Type", IMAGE_MIME[ext]);
                     res.end(data);
                     return;

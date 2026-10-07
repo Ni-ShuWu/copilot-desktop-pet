@@ -185,7 +185,7 @@
       img = new Image();
       img.onload = function () { imgReady = true; };
       img.onerror = function () { showError("贴图加载失败: " + cfg.sprite); };
-      img.src = "/" + cfg.sprite + "?t=" + Date.now();
+      img.src = "/" + encodeURI(cfg.sprite).replace(/#/g, "%23") + "?t=" + Date.now();
     }
     if (!cfg.animations || !cfg.animations[pet.anim]) {
       pet.anim = cfg.defaultAnimation || "idle";

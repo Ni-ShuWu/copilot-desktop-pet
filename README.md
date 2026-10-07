@@ -47,13 +47,14 @@
 
 面板顶部点「切换桌宠」，或桌面右键「打开设置」：
 
-- **保存当前桌宠**：把当前 `pet.json` + 贴图存进 `pets/<uuid>/` 库目录
+- **保存当前桌宠**：把当前 `pet.json` + 贴图保存到用户数据目录中的 `pets/<uuid>/`
 - **导入桌宠**：选一份配置 JSON + 对应的 spritesheet 图片（支持外部工具生成的
   `cell`/`row_counts` 记录格式，导入时自动归一化成 `frameWidth`/`frameHeight`/`animations`）
-- **切换**：点库里的任意桌宠立即换装（原子写入 `pet.json`，桌面窗热更新）
+- **切换**：点库里的任意桌宠立即换装（更新用户数据目录中的活动配置，桌面窗热更新）
+
+桌宠配置和库数据存放在 `%APPDATA%\\copilot-desktop-pet\\`（包括 `pet.json`、`pets/`）。首次启动时会从扩展目录复制旧版 `pet.json`；不会把导入的贴图复制进扩展，因此宠物库不会占用 Copilot 扩展的 8 MiB 安装限额。原有扩展目录中的贴图仍可作为当前桌宠的回退来源。
 
 对应 HTTP API：`GET /api/pets`、`POST /api/pets/save` / `/api/pets/import` / `/api/pets/activate`。
-`pets/` 是用户数据目录，已在 `.gitignore` 中忽略。
 
 扩展的 HTTP 服务默认固定监听 **10405** 端口（被占用时退回随机端口），
 外部工具可以按固定端口直接找到它；`PET_HTTP_PORT` 环境变量仍可覆盖。

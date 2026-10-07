@@ -4,8 +4,14 @@
 # 独立模式同样联动会话状态：检测 GitHub Copilot App 是否运行，并读取各会话 events.jsonl 的近期写入判断 working/idle
 param(
     [string]$ExtDir = $PSScriptRoot,
-    [string]$StateUrl = ""
+    [string]$StateUrl = "",
+    [string]$DataDir = ""
 )
+
+if (-not $DataDir) {
+    $appData = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE "AppData\Roaming" }
+    $DataDir = Join-Path $appData "copilot-desktop-pet"
+}
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -13,7 +19,33 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
-$script:configPath = Join-Path $ExtDir "pet.json"
+$script:configPath = Join-Path $DataDir "pet.json"
+$legacyConfigPath = Join-Path $ExtDir "pet.json"
+$legacyPetsPath = Join-Path $ExtDir "pets"
+if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+if (-not (Test-Path $script:configPath) -and (Test-Path $legacyConfigPath)) {
+    Copy-Item $legacyConfigPath $script:configPath -ErrorAction SilentlyContinue
+}
+if (-not (Test-Path (Join-Path $DataDir ".legacy-data-migrated"))) {
+    Get-ChildItem $ExtDir -File | Where-Object { $_.Extension -in '.png', '.gif', '.webp' } | ForEach-Object {
+        $target = Join-Path $DataDir $_.Name
+        if (-not (Test-Path $target)) { Copy-Item $_.FullName $target }
+    }
+    if (Test-Path $legacyPetsPath) {
+        $targetPetsPath = Join-Path $DataDir "pets"
+        New-Item -ItemType Directory -Path $targetPetsPath -Force | Out-Null
+        Get-ChildItem $legacyPetsPath -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($legacyPetsPath.Length).TrimStart('\\', '/')
+            $target = Join-Path $targetPetsPath $relative
+            if (-not (Test-Path $target)) {
+                $targetDir = Split-Path -Parent $target
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                Copy-Item $_.FullName $target
+            }
+        }
+    }
+    Set-Content -Path (Join-Path $DataDir ".legacy-data-migrated") -Value "" -NoNewline
+}
 
 function Read-PetConfig {
     try {
@@ -66,7 +98,8 @@ function Load-Bitmap([string]$file) {
     return $bmp
 }
 
-$script:spritePath = Join-Path $ExtDir ([string]$script:cfg.sprite)
+$script:spritePath = Join-Path $DataDir ([string]$script:cfg.sprite)
+if (-not (Test-Path $script:spritePath)) { $script:spritePath = Join-Path $ExtDir ([string]$script:cfg.sprite) }
 if (-not (Test-Path $script:spritePath)) { exit 1 }
 $script:bitmap = Load-Bitmap $script:spritePath
 
@@ -346,7 +379,8 @@ $pollTimer.Add_Tick({
                     if ($newScale -ne $script:scale) { $geomChanged = $true }
                     $newFps = if ($newCfg.fps) { [double]$newCfg.fps } else { 8 }
                     if ($newFps -ne $script:fps) { $geomChanged = $true }
-                    $newSprite = Join-Path $ExtDir ([string]$newCfg.sprite)
+                    $newSprite = Join-Path $DataDir ([string]$newCfg.sprite)
+                    if (-not (Test-Path $newSprite)) { $newSprite = Join-Path $ExtDir ([string]$newCfg.sprite) }
                     if ($newSprite -ne $script:spritePath -and (Test-Path $newSprite)) {
                         $script:spritePath = $newSprite
                         $script:bitmap = Load-Bitmap $newSprite
