@@ -19,6 +19,73 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
+# 聊天用 HTTP 桥：POST 在后台线程完成，结果塞进线程安全队列，
+# 由 UI 线程的 DispatcherTimer 取出来渲染（避免从线程池回调里直接碰 WPF 控件）
+if (-not ("PetChatBridge" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Net;
+using System.Text;
+
+public static class PetChatBridge
+{
+    public static void PostJson(string url, string json, ConcurrentQueue<string> queue, int timeoutMs)
+    {
+        try
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Method = "POST";
+            req.ContentType = "application/json; charset=utf-8";
+            req.Timeout = timeoutMs;
+            req.ReadWriteTimeout = timeoutMs;
+            var bytes = Encoding.UTF8.GetBytes(json == null ? "" : json);
+            req.ContentLength = bytes.Length;
+            req.BeginGetRequestStream(ar =>
+            {
+                try
+                {
+                    using (var stream = req.EndGetRequestStream(ar)) { stream.Write(bytes, 0, bytes.Length); }
+                    req.BeginGetResponse(ar2 =>
+                    {
+                        try
+                        {
+                            using (var resp = req.EndGetResponse(ar2))
+                            using (var reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                            {
+                                queue.Enqueue("BODY:" + reader.ReadToEnd());
+                            }
+                        }
+                        catch (WebException wex)
+                        {
+                            // 非 2xx 也带着 JSON 正文回来，交给 PowerShell 判断 ok / error
+                            try
+                            {
+                                if (wex.Response != null)
+                                {
+                                    using (var reader = new StreamReader(wex.Response.GetResponseStream(), Encoding.UTF8))
+                                    {
+                                        queue.Enqueue("BODY:" + reader.ReadToEnd());
+                                        return;
+                                    }
+                                }
+                            }
+                            catch { }
+                            queue.Enqueue("ERR:" + wex.Message);
+                        }
+                        catch (Exception ex) { queue.Enqueue("ERR:" + ex.Message); }
+                    }, null);
+                }
+                catch (Exception ex) { queue.Enqueue("ERR:" + ex.Message); }
+            }, null);
+        }
+        catch (Exception ex) { queue.Enqueue("ERR:" + ex.Message); }
+    }
+}
+"@
+}
+
 $script:configPath = Join-Path $DataDir "pet.json"
 $legacyConfigPath = Join-Path $ExtDir "pet.json"
 $legacyPetsPath = Join-Path $ExtDir "pets"
@@ -156,6 +223,7 @@ $script:hopY = 0.0
 $script:hopV = 0.0
 $script:overrideAnim = $null
 $script:activity = "idle"
+$script:workPhase = $null          # working 细分：thinking（思考中）| tool（跑工具）
 $script:lastMsg = $null
 $script:bubbleUntil = [DateTime]::MinValue
 $script:lastInteraction = Get-Date
@@ -169,7 +237,22 @@ $script:disconnNotified = $false   # 同一段断连只提示一次
 $script:configWriteTime = (Get-Item $script:configPath).LastWriteTime
 $script:autoWander = $true
 try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
+$script:lookAtMouse = $false
+try { $script:lookAtMouse = [bool]$script:cfg.behavior.lookAtMouse } catch {}
+$script:dragging = $false          # 拖着桌宠走 → drag 动画
+$script:pokeUntil = [DateTime]::MinValue   # 戳一下 → poke 动画（短时）
 $script:downPos = New-Object System.Drawing.Point(0, 0)
+
+# ---- 聊天窗（懒创建；关掉后下次再点「聊天…」重新建） ----
+$script:chatWin = $null
+$script:chatLog = $null
+$script:chatInput = $null
+$script:chatStatus = $null
+$script:chatScroll = $null
+$script:chatTimer = $null
+$script:chatQueue = $null
+$script:chatOpen = $false
+$script:chatBusy = $false
 
 # ---- 独立模式联动：检测 Copilot App 运行 + 读取会话事件日志活跃度 ----
 # 与 extension.mjs 的 anySessionActive / ACTIVE_WINDOW_MS 同口径：
@@ -223,14 +306,69 @@ function Get-AnimDef([string]$name) {
     return $prop.Value
 }
 
+# 特殊动画别名：pet.json 里写哪个名字都认（顺序即优先级），和 state.mjs 的 ANIM_ALIASES 一致
+$script:animAliases = @{
+    thinking = @("thinking", "think", "reasoning")
+    tool     = @("work", "typing", "busy")
+    drag     = @("drag", "grab", "lift")
+    poke     = @("poke", "tap", "hit")
+    chat     = @("chat", "talk", "talking")
+    look     = @("look", "stare", "watch")
+    sleep    = @("sleep", "rest")
+    walk     = @("walk")
+    review   = @("review", "done", "inspect")
+    aborted  = @("aborted", "stop", "cancel", "interrupted")
+    error    = @("error", "failed", "crash")
+}
+
+function Get-AnimAlias([string]$kind) {
+    $names = $script:animAliases[$kind]
+    if (-not $names) { return $null }
+    foreach ($n in $names) {
+        if ($null -ne (Get-AnimDef $n)) { return $n }
+    }
+    return $null
+}
+
 function Resolve-AnimName {
     if ($script:overrideAnim -and (Get-AnimDef $script:overrideAnim)) { return $script:overrideAnim }
-    if ($script:mode -eq "sleep" -and (Get-AnimDef "sleep")) { return "sleep" }
-    if ($script:activity -eq "working" -and (Get-AnimDef "work")) { return "work" }
-    if ($script:mode -eq "walk" -and (Get-AnimDef "walk")) { return "walk" }
+    if ($script:dragging) {
+        $n = Get-AnimAlias "drag"; if ($n) { return $n }
+    }
+    if ((Get-Date) -lt $script:pokeUntil) {
+        $n = Get-AnimAlias "poke"; if ($n) { return $n }
+    }
+    if ($script:activity -eq "working") {
+        # 思考中（模型在想）和干活（跑工具）分开演；拿不到阶段时按老行为演 work
+        if ($script:workPhase -eq "thinking") {
+            $n = Get-AnimAlias "thinking"; if ($n) { return $n }
+        }
+        $n = Get-AnimAlias "tool"; if ($n) { return $n }
+    }
+    if ($script:chatBusy -or $script:chatOpen) {
+        $n = Get-AnimAlias "chat"; if ($n) { return $n }
+    }
+    if ($script:lookAtMouse) {
+        $n = Get-AnimAlias "look"; if ($n) { return $n }
+    }
+    if ($script:mode -eq "sleep") {
+        $n = Get-AnimAlias "sleep"; if ($n) { return $n }
+    }
+    if ($script:mode -eq "walk") {
+        $n = Get-AnimAlias "walk"; if ($n) { return $n }
+    }
     $d = [string]$script:cfg.defaultAnimation
     if (Get-AnimDef $d) { return $d }
     return "idle"
+}
+
+# 光标相对桌宠中心的方向（看着鼠标时用来选行）
+function Get-LookTarget {
+    $cur = [System.Windows.Forms.Cursor]::Position
+    return @{
+        dx = $cur.X - ($window.Left + $window.Width / 2.0)
+        dy = $cur.Y - ($window.Top + $window.Height / 2.0)
+    }
 }
 
 # 配置热更新后重新应用几何（帧尺寸/缩放变化时窗口与元素都要跟着变）
@@ -281,7 +419,25 @@ function Update-SpriteFrame {
     }
     $script:frame = ($script:frame + 1) % $frames
     $flip = $script:dir
-    if ($script:dir -lt 0 -and $null -ne $anim.leftRow) {
+    if ($script:lookAtMouse -and $animName -eq "look" -and $null -ne $anim) {
+        # 看鼠标：按光标方向选行；贴图没给 upRow/downRow/leftRow 就复用 row / 水平镜像
+        $t = Get-LookTarget
+        if ([Math]::Abs($t.dx) -ge [Math]::Abs($t.dy)) {
+            if ($t.dx -lt 0) {
+                if ($null -ne $anim.leftRow) { $row = [int]$anim.leftRow; $flip = 1 } else { $flip = -1 }
+            } else {
+                $row = [int]$anim.row; $flip = 1
+            }
+        } elseif ($t.dy -lt 0) {
+            if ($null -ne $anim.upRow) { $row = [int]$anim.upRow }
+            else { $row = [int]$anim.row }
+            $flip = 1
+        } else {
+            if ($null -ne $anim.downRow) { $row = [int]$anim.downRow }
+            else { $row = [int]$anim.row }
+            $flip = 1
+        }
+    } elseif ($script:dir -lt 0 -and $null -ne $anim.leftRow) {
         $row = [int]$anim.leftRow   # 贴图自带左行帧（方向已烘焙），无需镜像
         $flip = 1
     }
@@ -299,6 +455,9 @@ function Decide {
     $span = [int](($max - $min) * 10)
     if ($span -lt 1) { $span = 10 }
     $script:nextDecision = (Get-Date).AddSeconds($min + (Get-Random -Minimum 0 -Maximum $span) / 10.0)
+
+    # 看着鼠标：专心盯光标，不走动也不睡
+    if ($script:lookAtMouse) { $script:mode = "idle"; return }
 
     if (-not $script:autoWander) { $script:mode = "idle"; return }
     if ($script:activity -eq "working" -and (Get-AnimDef "work")) {
@@ -424,12 +583,16 @@ $pollTimer.Add_Tick({
         if ($s.activity -eq "working") {
             $script:activity = "working"
             $badge.Visibility = "Visible"
+            if ($s.workPhase) { $script:workPhase = [string]$s.workPhase } else { $script:workPhase = $null }
             if ($script:mode -eq "sleep") { $script:mode = "idle"; $script:lastInteraction = Get-Date }
             if ($script:mode -eq "walk") { $script:mode = "idle" }
         } else {
             $script:activity = "idle"
+            $script:workPhase = $null
             $badge.Visibility = "Collapsed"
         }
+        # 看着鼠标：以服务端状态为准（右键菜单 / agent 工具 / 面板都能改）
+        if ($null -ne $s.lookAtMouse) { $script:lookAtMouse = [bool]$s.lookAtMouse }
     } catch {
         # 连接中断：绝不关窗自杀（原 failCount>=10 的自动退出已删除），进程始终不退，只降频重试
         $script:failCount += 1
@@ -455,13 +618,18 @@ $window.Add_MouseLeftButtonDown({
     $script:lastInteraction = Get-Date
     if ($script:mode -eq "sleep") { $script:mode = "idle" }
     $script:downPos = [System.Windows.Forms.Cursor]::Position
+    $script:dragging = $true
     try { $window.DragMove() } catch {}
+    $script:dragging = $false
 })
 
 $window.Add_MouseLeftButtonUp({
     $up = [System.Windows.Forms.Cursor]::Position
     $dist = [Math]::Abs($up.X - $script:downPos.X) + [Math]::Abs($up.Y - $script:downPos.Y)
-    if ($dist -lt 6) { Poke }
+    if ($dist -lt 6) {
+        Poke
+        $script:pokeUntil = (Get-Date).AddMilliseconds(1200)   # 戳一下：短时播 poke 动画
+    }
     $script:lastInteraction = Get-Date
     $waNow = [System.Windows.SystemParameters]::WorkArea
     if ($window.Left -lt $waNow.Left) { $window.Left = $waNow.Left }
@@ -491,6 +659,186 @@ function Get-PanelUrl {
     return ""
 }
 
+# ---- 聊天窗：和桌宠（= 当前 Copilot 会话）聊天 ----
+function Get-OfflineReply {
+    $list = $null
+    try { $list = $script:cfg.chat.offlineReplies } catch {}
+    if ($list -and $list.Count -gt 0) { return [string]($list | Get-Random) }
+    return "我现在连不上大脑（Copilot 会话），先陪我待会儿吧。"
+}
+
+function Add-ChatBubble([string]$text, [string]$who) {
+    if (-not $script:chatLog) { return }
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = $text
+    $tb.TextWrapping = "Wrap"
+    $border = New-Object System.Windows.Controls.Border
+    $border.CornerRadius = New-Object System.Windows.CornerRadius(8)
+    $border.Padding = New-Object System.Windows.Thickness(8, 5, 8, 5)
+    $border.Margin = New-Object System.Windows.Thickness(4, 2, 4, 2)
+    $border.MaxWidth = 290
+    if ($who -eq "me") {
+        $border.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromRgb(0x2D, 0x7D, 0xD2))
+        $tb.Foreground = [System.Windows.Media.Brushes]::White
+        $border.HorizontalAlignment = "Right"
+    } else {
+        $border.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromRgb(0xE9, 0xEB, 0xEF))
+        $tb.Foreground = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromRgb(0x1F, 0x23, 0x28))
+        $border.HorizontalAlignment = "Left"
+    }
+    $border.Child = $tb
+    $script:chatLog.Children.Add($border) | Out-Null
+    try { $script:chatScroll.ScrollToEnd() } catch {}
+}
+
+# 后台线程 POST 的结果在 UI 线程这里落地
+function Receive-ChatResult([string]$payload) {
+    $script:chatBusy = $false
+    if ($script:chatStatus) { $script:chatStatus.Text = "" }
+    if ($payload.StartsWith("ERR:")) {
+        Add-ChatBubble ("连不上大脑：" + $payload.Substring(4)) "pet"
+        return
+    }
+    $body = $payload
+    if ($body.StartsWith("BODY:")) { $body = $body.Substring(5) }
+    $obj = $null
+    try { $obj = $body | ConvertFrom-Json } catch {}
+    if ($null -ne $obj -and $obj.ok -and $obj.reply) { Add-ChatBubble ([string]$obj.reply) "pet" }
+    elseif ($null -ne $obj -and $obj.reply) { Add-ChatBubble ([string]$obj.reply) "pet" }
+    elseif ($null -ne $obj -and $obj.error) { Add-ChatBubble ([string]$obj.error) "pet" }
+    else { Add-ChatBubble (Get-OfflineReply) "pet" }
+}
+
+function Send-ChatMessage {
+    $text = ""
+    if ($script:chatInput) { $text = ([string]$script:chatInput.Text).Trim() }
+    if (-not $text) { return }
+    $script:chatInput.Text = ""
+    Add-ChatBubble $text "me"
+
+    $max = 2000
+    try { if ($script:cfg.chat.maxChars) { $max = [int]$script:cfg.chat.maxChars } } catch {}
+    if ($text.Length -gt $max) {
+        Add-ChatBubble ("消息太长啦，最多 " + $max + " 个字。") "pet"
+        return
+    }
+    if ($script:chatBusy) {
+        Add-ChatBubble "我还在想上一条呢，等一下下～" "pet"
+        return
+    }
+
+    $url = Get-PanelUrl
+    if ($url -eq "") {
+        # 没有运行中的扩展实例（独立模式）→ 用配置里的兜底台词，别让聊天框变成死胡同
+        Add-ChatBubble (Get-OfflineReply) "pet"
+        return
+    }
+
+    $timeout = 60000
+    try { if ($script:cfg.chat.timeoutMs) { $timeout = [int]$script:cfg.chat.timeoutMs } } catch {}
+    $json = @{ text = $text } | ConvertTo-Json -Compress
+    try {
+        $script:chatBusy = $true
+        if ($script:chatStatus) { $script:chatStatus.Text = "思考中…" }
+        [PetChatBridge]::PostJson($url + "api/chat", $json, $script:chatQueue, ($timeout + 5000))
+    } catch {
+        $script:chatBusy = $false
+        if ($script:chatStatus) { $script:chatStatus.Text = "" }
+        Add-ChatBubble (Get-OfflineReply) "pet"
+    }
+}
+
+function Show-ChatWindow {
+    if ($script:chatWin) {
+        try { $script:chatWin.Activate() | Out-Null } catch {}
+        return
+    }
+
+    $chatXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="聊天" Width="360" Height="420" Topmost="True" ShowInTaskbar="False"
+        WindowStartupLocation="Manual" Background="#FFF6F7F9">
+  <Grid Margin="8">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <ScrollViewer x:Name="ChatScroll" Grid.Row="0" VerticalScrollBarVisibility="Auto">
+      <StackPanel x:Name="ChatLog"/>
+    </ScrollViewer>
+    <TextBlock x:Name="ChatStatus" Grid.Row="1" Margin="4,4,4,0" FontSize="11" Foreground="#6B7280"/>
+    <Grid Grid.Row="2" Margin="0,6,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <TextBox x:Name="ChatInput" Grid.Column="0" MinHeight="26" VerticalContentAlignment="Center"/>
+      <Button x:Name="ChatSend" Grid.Column="1" Content="发送" Margin="6,0,0,0" Padding="14,3"/>
+    </Grid>
+  </Grid>
+</Window>
+"@
+
+    $reader = New-Object System.Xml.XmlNodeReader([xml]$chatXaml)
+    $script:chatWin = [Windows.Markup.XamlReader]::Load($reader)
+    $script:chatLog = $script:chatWin.FindName("ChatLog")
+    $script:chatInput = $script:chatWin.FindName("ChatInput")
+    $script:chatStatus = $script:chatWin.FindName("ChatStatus")
+    $script:chatScroll = $script:chatWin.FindName("ChatScroll")
+    $sendBtn = $script:chatWin.FindName("ChatSend")
+
+    # 贴在桌宠窗旁边（屏幕不够就退回屏幕内）
+    $wa2 = [System.Windows.SystemParameters]::WorkArea
+    $left = $window.Left - $script:chatWin.Width - 8
+    if ($left -lt $wa2.Left) { $left = $window.Left + $window.Width + 8 }
+    if ($left + $script:chatWin.Width -gt $wa2.Right) { $left = $wa2.Right - $script:chatWin.Width }
+    $top = $window.Top - $script:chatWin.Height + $window.Height
+    if ($top -lt $wa2.Top) { $top = $wa2.Top }
+    if ($top + $script:chatWin.Height -gt $wa2.Bottom) { $top = $wa2.Bottom - $script:chatWin.Height }
+    $script:chatWin.Left = $left
+    $script:chatWin.Top = $top
+
+    $sendBtn.Add_Click({ Send-ChatMessage })
+    $script:chatInput.Add_KeyDown({
+        if ($_.Key -eq [System.Windows.Input.Key]::Enter) {
+            Send-ChatMessage
+            $_.Handled = $true
+        }
+    })
+
+    $script:chatQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+    $script:chatTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:chatTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:chatTimer.Add_Tick({
+        $item = $null
+        while ($script:chatQueue -and $script:chatQueue.TryDequeue([ref]$item)) {
+            Receive-ChatResult ([string]$item)
+            $item = $null
+        }
+    })
+    $script:chatTimer.Start()
+
+    $script:chatWin.Add_Closed({
+        $script:chatOpen = $false
+        if ($script:chatTimer) { $script:chatTimer.Stop() }
+        $script:chatWin = $null
+        $script:chatLog = $null
+        $script:chatInput = $null
+        $script:chatStatus = $null
+        $script:chatScroll = $null
+        $script:chatTimer = $null
+        $script:chatQueue = $null
+        $script:chatBusy = $false
+    })
+
+    $script:chatOpen = $true
+    Add-ChatBubble ("我是「" + [string]$script:cfg.name + "」，想聊什么？") "pet"
+    $script:chatWin.Show()
+    $script:chatInput.Focus() | Out-Null
+}
+
 $menu = New-Object System.Windows.Controls.ContextMenu
 
 $itemSettings = New-Object System.Windows.Controls.MenuItem
@@ -502,12 +850,61 @@ $itemSettings.Add_Click({
 })
 $menu.Items.Add($itemSettings) | Out-Null
 
+$itemChat = New-Object System.Windows.Controls.MenuItem
+$itemChat.Header = "聊天…"
+$itemChat.Add_Click({ Show-ChatWindow })
+$menu.Items.Add($itemChat) | Out-Null
+
 $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 
 $itemWander = New-Object System.Windows.Controls.MenuItem
 $itemWander.Header = "自动走动 开/关"
 $itemWander.Add_Click({ $script:autoWander = -not $script:autoWander })
 $menu.Items.Add($itemWander) | Out-Null
+
+# 看着鼠标：有扩展实例时以服务端状态为准（面板/agent 工具也改得动），独立模式则本地切换
+$itemLook = New-Object System.Windows.Controls.MenuItem
+$itemLook.Header = "看着鼠标 开/关"
+$itemLook.Add_Click({
+    $want = -not $script:lookAtMouse
+    $url = Get-PanelUrl
+    if ($url -ne "") {
+        try {
+            $body = '{"enabled":' + $want.ToString().ToLower() + '}'
+            $r = Invoke-RestMethod -Uri ($url + "api/look_at_mouse") -Method Post -ContentType "application/json" -Body $body -TimeoutSec 3
+            if ($null -ne $r.lookAtMouse) { $want = [bool]$r.lookAtMouse }
+        } catch {}
+    }
+    $script:lookAtMouse = $want
+    $script:lastInteraction = Get-Date
+    if ($want) { Show-Bubble "盯着鼠标看～" 1800 }
+})
+$menu.Items.Add($itemLook) | Out-Null
+
+# 动画子菜单：每次展开重建，配置热更新后立刻能看到新动画
+$script:itemAnim = New-Object System.Windows.Controls.MenuItem
+$script:itemAnim.Header = "动画"
+$script:itemAnim.Add_Opened({
+    $script:itemAnim.Items.Clear()
+    $auto = New-Object System.Windows.Controls.MenuItem
+    $auto.Header = "自动"
+    $auto.IsCheckable = $true
+    $auto.IsChecked = ($null -eq $script:overrideAnim)
+    $auto.Add_Click({ $script:overrideAnim = $null })
+    $script:itemAnim.Items.Add($auto) | Out-Null
+    if ($script:cfg.animations) {
+        foreach ($p in $script:cfg.animations.PSObject.Properties) {
+            $mi = New-Object System.Windows.Controls.MenuItem
+            $mi.Header = $p.Name
+            $mi.IsCheckable = $true
+            $mi.IsChecked = ($script:overrideAnim -eq $p.Name)
+            $name = $p.Name
+            $mi.Add_Click({ $script:overrideAnim = $name }.GetNewClosure())
+            $script:itemAnim.Items.Add($mi) | Out-Null
+        }
+    }
+})
+$menu.Items.Add($script:itemAnim) | Out-Null
 
 $itemSleep = New-Object System.Windows.Controls.MenuItem
 $itemSleep.Header = "睡觉 / 醒来"

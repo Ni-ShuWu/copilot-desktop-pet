@@ -27,6 +27,15 @@
     cursor: pointer;
   }
   #bar button:hover { background: rgba(128,128,128,.25); }
+  .bar-field {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; opacity: .85; white-space: nowrap;
+  }
+  .bar-field select {
+    border: 1px solid rgba(128,128,128,.4);
+    background: rgba(128,128,128,.12);
+    color: inherit; border-radius: 8px; padding: 3px 6px; font: inherit;
+  }
   #status {
     font-size: 11px;
     opacity: .65;
@@ -100,6 +109,10 @@
 <div id="bar">
   <button id="btnToggle">召唤桌宠</button>
   <button id="btnLibrary" aria-expanded="false" aria-controls="library">切换桌宠</button>
+  <label class="bar-field">动画
+    <select id="animSelect" aria-label="播放动画"><option value="">自动</option></select>
+  </label>
+  <label class="bar-field"><input id="chkLook" type="checkbox" /> 看鼠标</label>
   <span id="status">…</span>
 </div>
 <section id="library" hidden aria-label="桌宠库">
@@ -131,6 +144,8 @@
   var libraryHint = document.getElementById("libraryHint");
   var configFile = document.getElementById("configFile");
   var spriteFile = document.getElementById("spriteFile");
+  var animSelect = document.getElementById("animSelect");
+  var chkLook = document.getElementById("chkLook");
 
   var config = null;
   var configRaw = "";
@@ -141,8 +156,33 @@
     x: 60, dir: 1, anim: "idle", frame: 0, frameTimer: 0,
     mode: "idle", nextDecisionAt: Date.now() + 3000,
     lastInteractionAt: Date.now(), dragging: false, dragOffsetX: 0,
-    hopV: 0, hopY: 0, remoteOverride: null
+    hopV: 0, hopY: 0, remoteOverride: null,
+    lookAtMouse: false, workPhase: null, pokeUntil: 0
   };
+
+  // 特殊动画别名（与 state.mjs ANIM_ALIASES 对齐）：按顺序取第一个已定义的
+  var ANIM_ALIASES = {
+    thinking: ["thinking", "think", "reasoning"],
+    tool: ["work", "typing", "busy"],
+    drag: ["drag", "grab", "lift"],
+    poke: ["poke", "tap", "hit"],
+    chat: ["chat", "talk", "talking"],
+    look: ["look", "stare", "watch"],
+    sleep: ["sleep", "rest"],
+    walk: ["walk"],
+    review: ["review", "done", "inspect"],
+    aborted: ["aborted", "stop", "cancel", "interrupted"],
+    error: ["error", "failed", "crash"]
+  };
+
+  function animAlias(kind) {
+    if (!config || !config.animations) return null;
+    var names = ANIM_ALIASES[kind] || [];
+    for (var i = 0; i < names.length; i++) {
+      if (config.animations[names[i]]) return names[i];
+    }
+    return null;
+  }
 
   var remoteMessage = null;
   var bubbleUntil = 0;
@@ -190,8 +230,28 @@
     if (!cfg.animations || !cfg.animations[pet.anim]) {
       pet.anim = cfg.defaultAnimation || "idle";
     }
+    fillAnimSelect(cfg);
     applyPollInterval(cfg);
     clampToStage();
+  }
+
+  function fillAnimSelect(cfg) {
+    var names = Object.keys((cfg && cfg.animations) || {});
+    var current = animSelect.value;
+    if (animSelect.dataset.built === names.join(",")) return;
+    animSelect.dataset.built = names.join(",");
+    animSelect.innerHTML = "";
+    var auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = "自动";
+    animSelect.appendChild(auto);
+    names.forEach(function (n) {
+      var o = document.createElement("option");
+      o.value = n;
+      o.textContent = n;
+      animSelect.appendChild(o);
+    });
+    animSelect.value = current;
   }
 
   function clampToStage() {
@@ -202,8 +262,13 @@
 
   function currentAnimName() {
     if (pet.remoteOverride && config.animations[pet.remoteOverride]) return pet.remoteOverride;
-    if (pet.mode === "walk" && config.animations.walk) return "walk";
-    if (pet.mode === "sleep" && config.animations.sleep) return "sleep";
+    if (pet.dragging) { var a = animAlias("drag"); if (a) return a; }
+    if (Date.now() < pet.pokeUntil) { var b = animAlias("poke"); if (b) return b; }
+    if (pet.workPhase === "thinking") { var c = animAlias("thinking"); if (c) return c; }
+    if (pet.workPhase) { var d = animAlias("tool"); if (d) return d; }
+    if (pet.lookAtMouse) { var e = animAlias("look"); if (e) return e; }
+    if (pet.mode === "walk") { var f = animAlias("walk"); if (f) return f; }
+    if (pet.mode === "sleep") { var g = animAlias("sleep"); if (g) return g; }
     return config.animations[pet.anim] ? pet.anim : (config.defaultAnimation || "idle");
   }
 
@@ -334,6 +399,7 @@
     pet.lastInteractionAt = Date.now();
     if (!moved) {
       pet.hopV = 220;
+      pet.pokeUntil = Date.now() + 1200;
       var phrases = (config.speech && config.speech.phrases) || [];
       if (phrases.length) setBubble(pick(phrases), 1800);
     }
@@ -454,6 +520,24 @@
     fetch("/api/pet/toggle", { method: "POST" }).then(pollState).catch(function () {});
   });
 
+  animSelect.addEventListener("change", function () {
+    pet.remoteOverride = animSelect.value || null;
+    fetch("/api/animation", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ animation: animSelect.value || null })
+    }).then(pollState).catch(function () {});
+  });
+
+  chkLook.addEventListener("change", function () {
+    pet.lookAtMouse = chkLook.checked;
+    fetch("/api/look_at_mouse", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: chkLook.checked })
+    }).then(pollState).catch(function () {});
+  });
+
   var pollTimer = null;
   var pollMs = 250;
   var es = null;
@@ -462,6 +546,13 @@
   function applyState(s) {
     if (!s) return;
     pet.remoteOverride = s.animation || null;
+    if (s.animation) ensureAnimOption(s.animation);
+    if (animSelect.value !== (s.animation || "")) animSelect.value = s.animation || "";
+    if (typeof s.lookAtMouse === "boolean") {
+      pet.lookAtMouse = s.lookAtMouse;
+      if (chkLook.checked !== s.lookAtMouse) chkLook.checked = s.lookAtMouse;
+    }
+    pet.workPhase = s.activity === "working" ? (s.workPhase || "tool") : null;
     if (s.message && s.message !== remoteMessage) {
       remoteMessage = s.message;
       setBubble(s.message, 4000);
@@ -469,8 +560,21 @@
     if (!s.message) remoteMessage = null;
     btnToggle.textContent = s.running ? "收回桌宠" : "召唤桌宠";
     statusEl.textContent = (s.running ? "桌面运行中" : "未召唤") +
-      (s.activity === "working" ? " · agent 工作中 🛠" : "") +
+      (s.activity === "working"
+        ? (pet.workPhase === "thinking" ? " · agent 思考中 💭" : " · agent 工作中 🛠")
+        : "") +
       (s.crashed ? " · 扩展异常已自愈" : "");
+  }
+
+  function ensureAnimOption(name) {
+    if (!name) return;
+    for (var i = 0; i < animSelect.options.length; i++) {
+      if (animSelect.options[i].value === name) return;
+    }
+    var o = document.createElement("option");
+    o.value = name;
+    o.textContent = name;
+    animSelect.appendChild(o);
   }
 
   function pollState() {
