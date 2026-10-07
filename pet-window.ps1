@@ -4,8 +4,14 @@
 # 独立模式同样联动会话状态：检测 GitHub Copilot App 是否运行，并读取各会话 events.jsonl 的近期写入判断 working/idle
 param(
     [string]$ExtDir = $PSScriptRoot,
-    [string]$StateUrl = ""
+    [string]$StateUrl = "",
+    [string]$DataDir = ""
 )
+
+if (-not $DataDir) {
+    $appData = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE "AppData\Roaming" }
+    $DataDir = Join-Path $appData "copilot-desktop-pet"
+}
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -13,7 +19,33 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
-$script:configPath = Join-Path $ExtDir "pet.json"
+$script:configPath = Join-Path $DataDir "pet.json"
+$legacyConfigPath = Join-Path $ExtDir "pet.json"
+$legacyPetsPath = Join-Path $ExtDir "pets"
+if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+if (-not (Test-Path $script:configPath) -and (Test-Path $legacyConfigPath)) {
+    Copy-Item $legacyConfigPath $script:configPath -ErrorAction SilentlyContinue
+}
+if (-not (Test-Path (Join-Path $DataDir ".legacy-data-migrated"))) {
+    Get-ChildItem $ExtDir -File | Where-Object { $_.Extension -in '.png', '.gif', '.webp' } | ForEach-Object {
+        $target = Join-Path $DataDir $_.Name
+        if (-not (Test-Path $target)) { Copy-Item $_.FullName $target }
+    }
+    if (Test-Path $legacyPetsPath) {
+        $targetPetsPath = Join-Path $DataDir "pets"
+        New-Item -ItemType Directory -Path $targetPetsPath -Force | Out-Null
+        Get-ChildItem $legacyPetsPath -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($legacyPetsPath.Length).TrimStart('\\', '/')
+            $target = Join-Path $targetPetsPath $relative
+            if (-not (Test-Path $target)) {
+                $targetDir = Split-Path -Parent $target
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                Copy-Item $_.FullName $target
+            }
+        }
+    }
+    Set-Content -Path (Join-Path $DataDir ".legacy-data-migrated") -Value "" -NoNewline
+}
 
 function Read-PetConfig {
     try {
@@ -66,7 +98,8 @@ function Load-Bitmap([string]$file) {
     return $bmp
 }
 
-$script:spritePath = Join-Path $ExtDir ([string]$script:cfg.sprite)
+$script:spritePath = Join-Path $DataDir ([string]$script:cfg.sprite)
+if (-not (Test-Path $script:spritePath)) { $script:spritePath = Join-Path $ExtDir ([string]$script:cfg.sprite) }
 if (-not (Test-Path $script:spritePath)) { exit 1 }
 $script:bitmap = Load-Bitmap $script:spritePath
 
@@ -346,7 +379,8 @@ $pollTimer.Add_Tick({
                     if ($newScale -ne $script:scale) { $geomChanged = $true }
                     $newFps = if ($newCfg.fps) { [double]$newCfg.fps } else { 8 }
                     if ($newFps -ne $script:fps) { $geomChanged = $true }
-                    $newSprite = Join-Path $ExtDir ([string]$newCfg.sprite)
+                    $newSprite = Join-Path $DataDir ([string]$newCfg.sprite)
+                    if (-not (Test-Path $newSprite)) { $newSprite = Join-Path $ExtDir ([string]$newCfg.sprite) }
                     if ($newSprite -ne $script:spritePath -and (Test-Path $newSprite)) {
                         $script:spritePath = $newSprite
                         $script:bitmap = Load-Bitmap $newSprite
@@ -437,7 +471,38 @@ $window.Add_MouseLeftButtonUp({
 })
 
 # ---- 右键菜单 ----
+# 设置面板 = 扩展 HTTP 服务上的 pet.html（桌宠库：切换 / 导入 / 保存）
+# 扩展拉起本窗时会传 -StateUrl；独立模式则从心跳注册表里找在跑的扩展实例
+# 注意：注册表清理只在扩展的 readRegistry 路径上做；独立模式打开设置时往往没有扩展在跑，
+# 所以这里必须自己做新鲜度校验（与 extension.mjs 的 REG_STALE_MS 同口径），过期/死进程的心跳文件顺手删除
+function Get-PanelUrl {
+    if ($StateUrl -ne "") { return $StateUrl }
+    $dir = Join-Path $env:TEMP "copilot-desktop-pet"
+    $staleMs = 12000
+    foreach ($f in Get-ChildItem $dir -Filter "inst-*.json" -ErrorAction SilentlyContinue) {
+        try {
+            $j = Get-Content -Raw $f.FullName | ConvertFrom-Json
+            $fresh = $j.ts -and (((Get-Date) - [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$j.ts).LocalDateTime).TotalMilliseconds -lt $staleMs)
+            $alive = $j.pid -and (Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue)
+            if (-not $fresh -or -not $alive) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; continue }
+            if ($j.url) { return [string]$j.url }
+        } catch {}
+    }
+    return ""
+}
+
 $menu = New-Object System.Windows.Controls.ContextMenu
+
+$itemSettings = New-Object System.Windows.Controls.MenuItem
+$itemSettings.Header = "打开设置"
+$itemSettings.Add_Click({
+    $url = Get-PanelUrl
+    if ($url -ne "") { Start-Process $url }
+    else { Show-Bubble "没有运行中的桌宠服务，先打开 Copilot 或运行 start-pet.bat" 4500 }
+})
+$menu.Items.Add($itemSettings) | Out-Null
+
+$menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 
 $itemWander = New-Object System.Windows.Controls.MenuItem
 $itemWander.Header = "自动走动 开/关"

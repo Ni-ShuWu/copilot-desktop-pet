@@ -2,8 +2,9 @@
 // 每个用例：仓库文件复制到临时目录 + SDK stub + pet.json + 空闲端口 + spawn extension.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { makeSandbox, startExtension, freePort, openSSE, waitFor, sleep } from "./helpers.mjs";
 
@@ -22,7 +23,10 @@ const BASE_PET = {
 /** 起一个隔离沙箱 + 扩展进程；用例结束后自动清理进程与临时目录 */
 async function boot(t, opts) {
     const o = opts || {};
-    const sb = await makeSandbox({ petJson: o.pet === undefined ? BASE_PET : o.pet });
+    const sb = await makeSandbox({
+        petJson: o.pet === undefined ? BASE_PET : o.pet,
+        extraFiles: Object.assign({ "spritesheet.png": Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]) }, o.extraFiles || {}),
+    });
     const port = await freePort();
     let ext;
     try {
@@ -323,7 +327,7 @@ test("11. 运行中热改 pet.json：/api/reload 与后续请求都能看到新�
     const next = withExternal(BASE_PET, { token: "rotated" });
     next.pollIntervalMs = 900;
     next.animations = Object.assign({}, BASE_PET.animations, { dance: { row: 3, frames: 6 } });
-    await writeFile(path.join(ext.dir, "pet.json"), JSON.stringify(next, null, 2));
+    await writeFile(path.join(ext.dir, "home", "AppData", "Roaming", "copilot-desktop-pet", "pet.json"), JSON.stringify(next, null, 2));
 
     const reload = await ext.request("POST", "/api/reload", { body: {} });
     assert.equal(reload.json.ok, true);
@@ -342,4 +346,66 @@ test("11. 运行中热改 pet.json：/api/reload 与后续请求都能看到新�
     const anim = await ext.request("POST", "/api/animation", { body: { animation: "dance" } });
     assert.equal(anim.status, 200);
     assert.equal((await ext.request("GET", "/api/state")).json.animation, "dance");
+});
+
+test("12. 导入与切换桌宠只写入 AppData，扩展目录体积不增长", async (t) => {
+    const ext = await boot(t, {});
+    const dataDir = path.join(ext.dir, "home", "AppData", "Roaming", "copilot-desktop-pet");
+    const extensionBytes = async () => {
+        let total = 0;
+        const visit = async (dir) => {
+            for (const entry of await readdir(dir, { withFileTypes: true })) {
+                if (entry.name === "node_modules" || entry.name === "home" || entry.name === "tmp") continue;
+                const filename = path.join(dir, entry.name);
+                if (entry.isDirectory()) await visit(filename);
+                else total += (await stat(filename)).size;
+            }
+        };
+        await visit(ext.dir);
+        return total;
+    };
+    const before = await extensionBytes();
+    const sprite = await readFile(path.join(ext.dir, "spritesheet.png"));
+    const imported = await ext.request("POST", "/api/pets/import", { body: {
+        config: BASE_PET,
+        spriteName: "large.png",
+        spriteData: sprite.toString("base64"),
+    } });
+    assert.equal(imported.status, 200, imported.text);
+    assert.equal((await extensionBytes()), before);
+
+    const listed = await ext.request("GET", "/api/pets");
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.pets.length, 1);
+    const petDir = path.join(dataDir, "pets", imported.json.pet.id);
+    assert.equal(JSON.parse(await readFile(path.join(petDir, "pet.json"), "utf8")).sprite, "spritesheet.png");
+    assert.equal((await ext.request("GET", "/pets/" + imported.json.pet.id + "/spritesheet.png")).status, 200);
+    const activation = await ext.request("POST", "/api/pets/activate", { body: { id: imported.json.pet.id } });
+    assert.equal(activation.json.ok, true);
+    const activeConfig = JSON.parse(await readFile(path.join(dataDir, "pet.json"), "utf8"));
+    assert.equal(activeConfig.sprite, path.join("pets", imported.json.pet.id, "spritesheet.png"));
+    assert.equal((await ext.request("GET", "/" + activeConfig.sprite)).status, 200);
+    assert.equal((await extensionBytes()), before);
+});
+
+test("13. 启动时将旧宠物库无覆盖迁移至 AppData", async (t) => {
+    const legacySprite = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    const legacyPet = { name: "旧宠物", sprite: "legacy.png", animations: BASE_PET.animations };
+    const legacyId = "12345678-1234-4234-8234-123456789abc";
+    const ext = await boot(t, {
+        pet: legacyPet,
+        extraFiles: {
+            "legacy.png": legacySprite,
+            [path.join("pets", "active.json")]: JSON.stringify({ id: legacyId }),
+            [path.join("pets", legacyId, "pet.json")]: JSON.stringify(Object.assign({}, legacyPet, { sprite: "legacy.png" })),
+            [path.join("pets", legacyId, "legacy.png")]: legacySprite,
+        },
+    });
+    const dataDir = path.join(ext.dir, "home", "AppData", "Roaming", "copilot-desktop-pet");
+    assert.deepEqual(await readFile(path.join(dataDir, "legacy.png")), legacySprite);
+    assert.deepEqual(await readFile(path.join(dataDir, "pets", legacyId, "legacy.png")), legacySprite);
+    assert.deepEqual(JSON.parse(await readFile(path.join(dataDir, "pets", "active.json"), "utf8")), { id: legacyId });
+    assert.equal((await ext.request("GET", "/api/pets")).json.pets[0].id, legacyId);
+    assert.equal((await ext.request("GET", "/pets/" + legacyId + "/legacy.png")).status, 200);
+    assert.equal((await ext.request("GET", "/legacy.png")).status, 200);
 });

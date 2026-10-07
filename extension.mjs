@@ -8,7 +8,9 @@
 // 状态机与纯逻辑放在 state.mjs，本文件只负责 IO / 协议 / 进程管理。
 
 import { createServer } from "node:http";
-import { readFile, stat, readdir, writeFile, mkdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, stat, readdir, writeFile, mkdir, unlink, copyFile, rename } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { unlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,7 +37,11 @@ import {
 } from "./state.mjs";
 
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_FILE = path.join(EXT_DIR, "pet.json");
+const USER_DATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "copilot-desktop-pet");
+const LEGACY_CONFIG_FILE = path.join(EXT_DIR, "pet.json");
+const CONFIG_FILE = path.join(USER_DATA_DIR, "pet.json");
+const PET_LIBRARY_DIR = path.join(USER_DATA_DIR, "pets");
+const ACTIVE_PET_FILE = path.join(PET_LIBRARY_DIR, "active.json");
 const HTML_FILE = path.join(EXT_DIR, "pet.html");
 const PS1_FILE = path.join(EXT_DIR, "pet-window.ps1");
 
@@ -44,6 +50,10 @@ const CRASH_RECOVERY_MS = 5000;
 const CRASH_WINDOW_MS = 60000;
 const CRASH_TRIPLE = 3;
 const BODY_LIMIT = 64 * 1024;
+const PET_IMPORT_BODY_LIMIT = 17 * 1024 * 1024;
+
+// 默认固定 10405：启动脚本与外部工具按固定端口找扩展；被占用时退回随机端口
+const DEFAULT_HTTP_PORT = 10405;
 
 const IMAGE_MIME = { ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp" };
 
@@ -52,12 +62,59 @@ let sessionRef = null;
 
 let configCache = { mtimeMs: -1, config: DEFAULT_CONFIG, error: null };
 
+async function copyDirectoryWithoutOverwrite(source, destination) {
+    let entries;
+    try { entries = await readdir(source, { withFileTypes: true }); }
+    catch (err) { if (err.code === "ENOENT") return; throw err; }
+    await mkdir(destination, { recursive: true });
+    for (const entry of entries) {
+        const from = path.join(source, entry.name);
+        const to = path.join(destination, entry.name);
+        if (entry.isDirectory()) {
+            await copyDirectoryWithoutOverwrite(from, to);
+        } else if (entry.isFile()) {
+            try { await copyFile(from, to, fsConstants.COPYFILE_EXCL); }
+            catch (err) { if (err.code !== "EEXIST") throw err; }
+        }
+    }
+}
+
+async function ensureUserData() {
+    await mkdir(PET_LIBRARY_DIR, { recursive: true });
+    let configExists = true;
+    try { await stat(CONFIG_FILE); } catch { configExists = false; }
+    if (!configExists) {
+        try { await copyFile(LEGACY_CONFIG_FILE, CONFIG_FILE, fsConstants.COPYFILE_EXCL); }
+        catch (err) {
+            if (err.code !== "EEXIST" && err.code !== "ENOENT") throw err;
+            if (err.code === "ENOENT") {
+                await writeFile(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2), { flag: "wx" }).catch((e) => {
+                    if (e.code !== "EEXIST") throw e;
+                });
+            }
+        }
+    }
+
+    const migrationMarker = path.join(USER_DATA_DIR, ".legacy-data-migrated");
+    try { await stat(migrationMarker); return; } catch {}
+    for (const entry of await readdir(EXT_DIR, { withFileTypes: true })) {
+        if (!entry.isFile() || !supportedSpriteExt(entry.name)) continue;
+        try { await copyFile(path.join(EXT_DIR, entry.name), path.join(USER_DATA_DIR, entry.name), fsConstants.COPYFILE_EXCL); }
+        catch (err) { if (err.code !== "EEXIST") throw err; }
+    }
+    await copyDirectoryWithoutOverwrite(path.join(EXT_DIR, "pets"), PET_LIBRARY_DIR);
+    await writeFile(migrationMarker, "", { flag: "wx" }).catch((err) => {
+        if (err.code !== "EEXIST") throw err;
+    });
+}
+
 async function readConfig(force) {
     try {
+        await ensureUserData();
         const st = await stat(CONFIG_FILE);
         if (force || st.mtimeMs !== configCache.mtimeMs) {
             const raw = await readFile(CONFIG_FILE, "utf8");
-            const parsed = JSON.parse(raw);
+            const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
             configCache = {
                 mtimeMs: st.mtimeMs,
                 config: mergeConfig(parsed),
@@ -68,6 +125,149 @@ async function readConfig(force) {
         configCache = Object.assign({}, configCache, { error: String((err && err.message) || err) });
     }
     return configCache;
+}
+
+function petLibraryPath(id) {
+    if (!/^[0-9a-f-]{36}$/i.test(String(id || ""))) return null;
+    return path.join(PET_LIBRARY_DIR, id);
+}
+
+function supportedSpriteExt(filename) {
+    const ext = path.extname(String(filename || "")).toLowerCase();
+    return Object.prototype.hasOwnProperty.call(IMAGE_MIME, ext) ? ext : null;
+}
+
+async function resolveSpritePath(filename) {
+    const relative = String(filename || "").replace(/[\\/]+/g, path.sep);
+    if (!relative || path.isAbsolute(relative) || relative.split(path.sep).some((part) => !part || part === "." || part === "..")) return null;
+    const userPath = path.resolve(USER_DATA_DIR, relative);
+    if (!userPath.startsWith(path.resolve(USER_DATA_DIR) + path.sep)) return null;
+    try { await stat(userPath); return userPath; } catch {}
+    const petMatch = relative.match(/^pets[\\/]([0-9a-f-]{36})[\\/]([^\\/]+)$/i);
+    if (petMatch) {
+        const petDir = petLibraryPath(petMatch[1]);
+        const petSprite = path.join(petDir, path.basename(petMatch[2]));
+        try { await stat(petSprite); return petSprite; } catch {}
+    }
+    if (relative.includes(path.sep)) return null;
+    const extensionPath = path.join(EXT_DIR, relative);
+    try { await stat(extensionPath); return extensionPath; } catch {}
+    return null;
+}
+
+function matchesImageType(data, ext) {
+    if (ext === ".png") return data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    if (ext === ".gif") return data.subarray(0, 3).toString("ascii") === "GIF";
+    return data.subarray(0, 4).toString("ascii") === "RIFF" && data.subarray(8, 12).toString("ascii") === "WEBP";
+}
+
+// 外部工具生成的桌宠记录 JSON 用 cell 描述帧尺寸、没有 animations：
+// 导入与切换统一走归一化，保证写出的 pet.json 桌面窗和面板都能直接用。
+function normalizePetConfig(cfg) {
+    if (!cfg || typeof cfg !== "object") return cfg;
+    if ((!cfg.frameWidth || !cfg.frameHeight)
+        && Array.isArray(cfg.cell) && Number(cfg.cell[0]) > 0 && Number(cfg.cell[1]) > 0) {
+        cfg.frameWidth = Number(cfg.cell[0]);
+        cfg.frameHeight = Number(cfg.cell[1]);
+        if (!cfg.scale) cfg.scale = 1;   // 记录格式贴图按原始像素尺寸展示
+    }
+    if (!cfg.animations || typeof cfg.animations !== "object"
+        || Object.keys(cfg.animations).length === 0) {
+        cfg.animations = Object.assign({}, DEFAULT_CONFIG.animations);
+    }
+    return cfg;
+}
+
+async function listPetLibrary() {
+    await mkdir(PET_LIBRARY_DIR, { recursive: true });
+    const pets = [];
+    let activeId = "";
+    try { activeId = JSON.parse(await readFile(ACTIVE_PET_FILE, "utf8")).id || ""; } catch {}
+    for (const id of await readdir(PET_LIBRARY_DIR)) {
+        const dir = petLibraryPath(id);
+        if (!dir) continue;
+        try {
+            const cfg = JSON.parse((await readFile(path.join(dir, "pet.json"), "utf8")).replace(/^\uFEFF/, ""));
+            pets.push({ id, name: String(cfg.name || "未命名桌宠"), sprite: String(cfg.sprite || "") });
+        } catch {}
+    }
+    return { pets, activeId };
+}
+
+async function saveCurrentPet() {
+    const { config, error } = await readConfig(true);
+    if (error) return { ok: false, status: 400, error: "当前 pet.json 无法读取: " + error };
+    const sprite = String(config.sprite || "");
+    const ext = supportedSpriteExt(sprite);
+    if (!ext) {
+        return { ok: false, status: 400, error: "当前配置引用了不支持的贴图文件" };
+    }
+    const spritePath = await resolveSpritePath(sprite);
+    if (!spritePath) return { ok: false, status: 400, error: "找不到当前桌宠贴图: " + sprite };
+
+    const id = randomUUID();
+    const dir = petLibraryPath(id);
+    const libraryConfig = Object.assign({}, config, { sprite: path.basename(sprite) });
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "pet.json"), JSON.stringify(libraryConfig, null, 2), "utf8");
+    await copyFile(spritePath, path.join(dir, path.basename(sprite)));
+    return { ok: true, pet: { id, name: String(config.name || "未命名桌宠"), sprite: path.basename(sprite) } };
+}
+
+async function importPet(body) {
+    let cfg;
+    try {
+        cfg = typeof body.config === "string"
+            ? JSON.parse(body.config.replace(/^\uFEFF/, ""))
+            : body.config;
+    } catch { return { ok: false, status: 400, error: "桌宠配置不是有效 JSON" }; }
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+        return { ok: false, status: 400, error: "桌宠配置必须是 JSON 对象" };
+    }
+    cfg = normalizePetConfig(cfg);
+    const ext = supportedSpriteExt(body.spriteName);
+    if (!ext) return { ok: false, status: 400, error: "贴图仅支持 PNG、GIF 或 WebP" };
+    const encoded = String(body.spriteData || "");
+    if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+        return { ok: false, status: 400, error: "贴图数据无效" };
+    }
+    const sprite = Buffer.from(encoded, "base64");
+    if (!sprite.length || sprite.length > 12 * 1024 * 1024 || sprite.toString("base64") !== encoded || !matchesImageType(sprite, ext)) {
+        return { ok: false, status: 400, error: "贴图内容无效、类型不匹配或超过 12 MB" };
+    }
+
+    const id = randomUUID();
+    const dir = petLibraryPath(id);
+    const spriteName = "spritesheet" + ext;
+    cfg.sprite = spriteName;
+    cfg.name = String(cfg.name || "未命名桌宠").slice(0, 100);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "pet.json"), JSON.stringify(cfg, null, 2), "utf8");
+    await writeFile(path.join(dir, spriteName), sprite);
+    return { ok: true, pet: { id, name: cfg.name, sprite: spriteName } };
+}
+
+async function activatePet(id) {
+    const dir = petLibraryPath(id);
+    if (!dir) return { ok: false, status: 400, error: "无效的桌宠编号" };
+    let cfg;
+    try { cfg = JSON.parse((await readFile(path.join(dir, "pet.json"), "utf8")).replace(/^\uFEFF/, "")); }
+    catch { return { ok: false, status: 404, error: "找不到该桌宠配置" }; }
+    cfg = normalizePetConfig(cfg);
+    const sprite = String(cfg.sprite || "");
+    const ext = supportedSpriteExt(sprite);
+    if (!ext || path.basename(sprite) !== sprite) return { ok: false, status: 400, error: "桌宠贴图配置无效" };
+    try { await stat(path.join(dir, sprite)); }
+    catch { return { ok: false, status: 404, error: "桌宠贴图文件不存在" }; }
+
+    cfg.sprite = path.join("pets", id, sprite);
+    const tempConfig = CONFIG_FILE + "." + id + ".tmp";
+    await writeFile(tempConfig, JSON.stringify(cfg, null, 2), "utf8");
+    await rename(tempConfig, CONFIG_FILE);
+    await writeFile(ACTIVE_PET_FILE, JSON.stringify({ id }), "utf8");
+    const { config, error } = await readConfig(true);
+    if (error) return { ok: false, status: 500, error };
+    return { ok: true, config };
 }
 
 // ---- 桌宠共享状态（桌面窗与面板轮询/订阅获取） ----
@@ -197,17 +397,26 @@ async function broadcastState() {
     } catch {}
 }
 
-function readBody(req) {
-    return new Promise((resolve) => {
-        let data = "";
+function readBody(req, limit) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
         let size = 0;
+        let tooLarge = false;
         req.on("data", (chunk) => {
+            if (tooLarge) return;
             size += chunk.length;
-            if (size > BODY_LIMIT) { req.destroy(); return; }
-            data += chunk;
+            if (size > (limit || BODY_LIMIT)) {
+                tooLarge = true;
+                const error = new Error("request body too large");
+                error.statusCode = 413;
+                reject(error);
+                req.resume();
+                return;
+            }
+            chunks.push(chunk);
         });
-        req.on("end", () => resolve(data));
-        req.on("error", () => resolve(""));
+        req.on("end", () => { if (!tooLarge) resolve(Buffer.concat(chunks).toString("utf8")); });
+        req.on("error", (error) => { if (!tooLarge) reject(error); });
     });
 }
 
@@ -247,6 +456,7 @@ async function startDesktopPet() {
         "-File", PS1_FILE,
         "-ExtDir", EXT_DIR,
         "-StateUrl", serverEntry.url,
+        "-DataDir", USER_DATA_DIR,
     ], { stdio: "ignore", windowsHide: true });
     petProc.on("exit", () => { petProc = null; });
     return { ok: true, pid: petProc.pid };
@@ -380,6 +590,36 @@ async function startServer() {
                 req.on("close", () => sseClients.delete(res));
                 return;
             }
+            if (p === "/api/pets" && req.method === "GET") {
+                const library = await listPetLibrary();
+                sendJson(res, library);
+                return;
+            }
+            if (p === "/api/pets/save" && isPost) {
+                // 保存只是生成副本，不改变当前激活的桌宠
+                const result = await saveCurrentPet();
+                sendJson(res, result, result.ok ? 200 : result.status);
+                return;
+            }
+            if (p === "/api/pets/import" && isPost) {
+                const body = parseBody(await readBody(req, PET_IMPORT_BODY_LIMIT));
+                if (body === null) { sendJson(res, { ok: false, error: "invalid json" }, 400); return; }
+                const imported = await importPet(body);
+                if (!imported.ok) { sendJson(res, imported, imported.status); return; }
+                const result = await activatePet(imported.pet.id);
+                if (!result.ok) { sendJson(res, result, result.status); return; }
+                sendJson(res, imported);
+                broadcastState();
+                return;
+            }
+            if (p === "/api/pets/activate" && isPost) {
+                const body = parseBody(await readBody(req));
+                if (body === null) { sendJson(res, { ok: false, error: "invalid json" }, 400); return; }
+                const result = await activatePet(body.id);
+                sendJson(res, result, result.ok ? 200 : result.status);
+                if (result.ok) broadcastState();
+                return;
+            }
             if (p === "/api/pet/show" || p === "/api/pet/hide" || p === "/api/pet/toggle") {
                 const r = p === "/api/pet/show" ? await startDesktopPet()
                         : p === "/api/pet/hide" ? await stopDesktopPet()
@@ -437,9 +677,16 @@ async function startServer() {
                 return;
             }
             const ext = path.extname(p).toLowerCase();
-            if (IMAGE_MIME[ext] && !p.includes("..")) {
+            if (IMAGE_MIME[ext]) {
                 try {
-                    const data = await readFile(path.join(EXT_DIR, path.basename(p)));
+                    const filename = decodeURIComponent(p.slice(1));
+                    if (path.extname(filename).toLowerCase() !== ext) throw new Error("image type mismatch");
+                    const petMatch = filename.match(/^pets[\\/]([0-9a-f-]{36})[\\/]([^\\/]+)$/i);
+                    const spritePath = petMatch
+                        ? path.join(petLibraryPath(petMatch[1]), path.basename(petMatch[2]))
+                        : await resolveSpritePath(filename);
+                    if (!spritePath) throw new Error("sprite not found");
+                    const data = await readFile(spritePath);
                     res.setHeader("Content-Type", IMAGE_MIME[ext]);
                     res.end(data);
                     return;
@@ -448,12 +695,15 @@ async function startServer() {
             res.statusCode = 404;
             res.end("not found");
         } catch (err) {
-            res.statusCode = 500;
-            res.end(String(err));
+            if (!res.headersSent) {
+                sendJson(res, { ok: false, error: err.message || String(err) }, err.statusCode || 500);
+            } else {
+                res.destroy(err);
+            }
         }
     });
     const wanted = Number(process.env.PET_HTTP_PORT);
-    let port = Number.isFinite(wanted) && wanted > 0 ? wanted : 0;
+    let port = Number.isFinite(wanted) && wanted > 0 ? wanted : DEFAULT_HTTP_PORT;
     const listen = (p) => new Promise((resolve, reject) => {
         const onErr = (err) => { server.removeListener("listening", onOk); reject(err); };
         const onOk = () => { server.removeListener("error", onErr); resolve(); };
