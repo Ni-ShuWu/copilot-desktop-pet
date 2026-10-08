@@ -7,7 +7,7 @@ import {
     ERROR_PHRASES, ANIM_ALIASES, BUBBLE_TEXT_MAX,
     clampPollMs, mergeConfig, createPetState, markWorking, markIdle, sanitizeActivity,
     computeActivity, say, visibleMessage, setAnimation, pickPhrase,
-    setLookAtMouse, setWorkPhase, resolveAnimAlias, buildChatPrompt, truncateForBubble, normalizeChatText,
+    setLookAtCopilot, setWorkPhase, resolveAnimAlias, buildChatPrompt, truncateForBubble, normalizeChatText,
 } from "../state.mjs";
 
 test("clampPollMs: 默认值 / 上下界 / 非法值", () => {
@@ -229,19 +229,19 @@ test("pickPhrase: 走随机函数且在列表内", () => {
     assert.ok(ABORT_PHRASES.every((p) => !ERROR_PHRASES.includes(p)));
 });
 
-test("setLookAtMouse: 显式开关与缺省取反", () => {
+test("setLookAtCopilot: 显式开关与缺省取反", () => {
     const st = createPetState(0);
-    assert.equal(st.lookAtMouse, false);
-    assert.deepEqual(setLookAtMouse(st, true), { ok: true, lookAtMouse: true });
-    assert.deepEqual(setLookAtMouse(st, true), { ok: true, lookAtMouse: true });
-    assert.deepEqual(setLookAtMouse(st, false), { ok: true, lookAtMouse: false });
+    assert.equal(st.lookAtCopilot, false);
+    assert.deepEqual(setLookAtCopilot(st, true), { ok: true, lookAtCopilot: true });
+    assert.deepEqual(setLookAtCopilot(st, true), { ok: true, lookAtCopilot: true });
+    assert.deepEqual(setLookAtCopilot(st, false), { ok: true, lookAtCopilot: false });
     // 右键菜单的「开/关」：不传参数即取反
-    assert.deepEqual(setLookAtMouse(st, undefined), { ok: true, lookAtMouse: true });
-    assert.deepEqual(setLookAtMouse(st, null), { ok: true, lookAtMouse: false });
+    assert.deepEqual(setLookAtCopilot(st, undefined), { ok: true, lookAtCopilot: true });
+    assert.deepEqual(setLookAtCopilot(st, null), { ok: true, lookAtCopilot: false });
     // 真值/假值都收敛成布尔
-    assert.deepEqual(setLookAtMouse(st, 1), { ok: true, lookAtMouse: true });
-    assert.deepEqual(setLookAtMouse(st, 0), { ok: true, lookAtMouse: false });
-    assert.deepEqual(setLookAtMouse(st, "yes"), { ok: true, lookAtMouse: true });
+    assert.deepEqual(setLookAtCopilot(st, 1), { ok: true, lookAtCopilot: true });
+    assert.deepEqual(setLookAtCopilot(st, 0), { ok: true, lookAtCopilot: false });
+    assert.deepEqual(setLookAtCopilot(st, "yes"), { ok: true, lookAtCopilot: true });
 });
 
 test("setWorkPhase: 只接受 thinking/tool，其余清空", () => {
@@ -326,14 +326,14 @@ test("normalizeChatText: 空/超长拒绝，正常输入 trim", () => {
     assert.equal(normalizeChatText("abcde", mergeConfig({ chat: { maxChars: 5 } })).ok, true);
 });
 
-test("mergeConfig: chat 块与 behavior.lookAtMouse 补齐", () => {
+test("mergeConfig: chat 块与 behavior.lookAtCopilot 补齐", () => {
     const cfg = mergeConfig({ chat: { maxChars: 500, offlineReplies: ["稍后再聊"] } });
     assert.equal(cfg.chat.maxChars, 500);
     assert.deepEqual(cfg.chat.offlineReplies, ["稍后再聊"]);
     assert.equal(cfg.chat.persona, DEFAULT_CONFIG.chat.persona);
     assert.equal(cfg.chat.timeoutMs, DEFAULT_CONFIG.chat.timeoutMs);
-    assert.equal(cfg.behavior.lookAtMouse, false);
-    assert.equal(mergeConfig({ behavior: { lookAtMouse: true } }).behavior.lookAtMouse, true);
+    assert.equal(cfg.behavior.lookAtCopilot, false);
+    assert.equal(mergeConfig({ behavior: { lookAtCopilot: true } }).behavior.lookAtCopilot, true);
     // 不污染默认值
     cfg.chat.maxChars = 99999;
     assert.equal(DEFAULT_CONFIG.chat.maxChars, 2000);

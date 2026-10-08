@@ -37,7 +37,7 @@ import {
     say,
     visibleMessage,
     setAnimation,
-    setLookAtMouse,
+    setLookAtCopilot,
     setWorkPhase,
     resolveAnimAlias,
     pickPhrase,
@@ -202,6 +202,20 @@ async function listPetLibrary() {
         } catch {}
     }
     return { pets, activeId };
+}
+
+// 在资源管理器中打开桌宠库文件夹（路径固定，不接受外部输入）
+async function openPetLibraryFolder() {
+    await mkdir(PET_LIBRARY_DIR, { recursive: true });
+    if (process.platform !== "win32") return { ok: false, error: "仅支持 Windows", path: PET_LIBRARY_DIR };
+    if (process.env.PET_TEST_NO_SHELL === "1") return { ok: true, path: PET_LIBRARY_DIR, shell: false };
+    try {
+        const child = spawn("explorer.exe", [PET_LIBRARY_DIR], { detached: true, stdio: "ignore" });
+        child.unref();
+        return { ok: true, path: PET_LIBRARY_DIR };
+    } catch (e) {
+        return { ok: false, error: String(e && e.message || e), path: PET_LIBRARY_DIR };
+    }
 }
 
 async function saveCurrentPet() {
@@ -384,7 +398,7 @@ async function buildState() {
         activity: active.activity,
         activitySource: active.source,
         workPhase: petState.workPhase,
-        lookAtMouse: !!petState.lookAtMouse,
+        lookAtCopilot: !!petState.lookAtCopilot,
         running: isPetRunning() || !!foreignPet,
         sessions: entries.length,
         crashed: petState.crashed,
@@ -503,9 +517,9 @@ function petSetAnimation(anim, config) {
     return r;
 }
 
-// 看着鼠标：桌面窗据此让桌宠朝光标方向转头
-function petLookAtMouse(enabled) {
-    const r = setLookAtMouse(petState, enabled);
+// 看着对话框：桌面窗据此让桌宠朝 Copilot 对话框方向转头
+function petLookAtCopilot(enabled) {
+    const r = setLookAtCopilot(petState, enabled);
     broadcastState();
     return r;
 }
@@ -734,11 +748,16 @@ async function startServer() {
                 sendJson(res, r, r.ok ? 200 : (r.status || 500));
                 return;
             }
-            // 看着鼠标：body.enabled 缺省即取反
-            if (p === "/api/look_at_mouse" && isPost) {
+            // 看着对话框：body.enabled 缺省即取反
+            if (p === "/api/look_at_copilot" && isPost) {
                 const body = parseBody(await readBody(req));
                 if (body === null) { sendJson(res, { ok: false, error: "invalid json" }, 400); return; }
-                sendJson(res, petLookAtMouse(body.enabled));
+                sendJson(res, petLookAtCopilot(body.enabled));
+                return;
+            }
+            // 打开桌宠库所在文件夹（固定路径，不接受外部传入）
+            if (p === "/api/open_folder" && isPost) {
+                sendJson(res, await openPetLibraryFolder());
                 return;
             }
             if (p === "/api/reload" && isPost) {
@@ -880,8 +899,8 @@ const session = await joinSession({
             },
         },
         {
-            name: "desktop_pet_look_at_mouse",
-            description: "让桌宠看着当前鼠标位置（转头跟随光标），可开启/关闭/切换。",
+            name: "desktop_pet_look_at_copilot",
+            description: "让桌宠看着 Copilot 对话框（转头朝向对话框窗口），可开启/关闭/切换。",
             parameters: {
                 type: "object",
                 properties: {
@@ -889,8 +908,8 @@ const session = await joinSession({
                 },
             },
             handler: async (args) => {
-                const r = petLookAtMouse(args && args.enabled);
-                return r.lookAtMouse ? "桌宠开始盯着鼠标看了。" : "桌宠不再看鼠标了。";
+                const r = petLookAtCopilot(args && args.enabled);
+                return r.lookAtCopilot ? "桌宠开始盯着对话框看了。" : "桌宠不再看对话框了。";
             },
         },
         {
@@ -947,13 +966,19 @@ const session = await joinSession({
                     },
                 },
                 {
-                    name: "look_at_mouse",
-                    description: "让桌宠看着鼠标（省略 enabled 即切换）",
+                    name: "look_at_copilot",
+                    description: "让桌宠看着 Copilot 对话框（省略 enabled 即切换）",
                     inputSchema: {
                         type: "object",
                         properties: { enabled: { type: "boolean" } },
                     },
-                    handler: async (ctx) => petLookAtMouse(ctx.input && ctx.input.enabled),
+                    handler: async (ctx) => petLookAtCopilot(ctx.input && ctx.input.enabled),
+                },
+                {
+                    name: "open_folder",
+                    description: "在资源管理器中打开桌宠库文件夹",
+                    inputSchema: { type: "object", properties: {} },
+                    handler: async () => openPetLibraryFolder(),
                 },
                 {
                     name: "chat",

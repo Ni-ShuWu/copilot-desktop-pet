@@ -52,6 +52,7 @@
   #library[hidden] { display: none; }
   .library-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
   .library-head strong { font-size: 14px; letter-spacing: .02em; }
+  .library-head span { display: inline-flex; gap: 6px; }
   #library button, #library .file-button {
     box-sizing: border-box; border: 1px solid #415572; border-radius: 7px;
     background: #202e44; color: #e8eef7; padding: 6px 9px; font: inherit; cursor: pointer;
@@ -112,11 +113,11 @@
   <label class="bar-field">动画
     <select id="animSelect" aria-label="播放动画"><option value="">自动</option></select>
   </label>
-  <label class="bar-field"><input id="chkLook" type="checkbox" /> 看鼠标</label>
+  <label class="bar-field"><input id="chkLook" type="checkbox" /> 看对话框</label>
   <span id="status">…</span>
 </div>
 <section id="library" hidden aria-label="桌宠库">
-  <div class="library-head"><strong>桌宠库</strong><button id="btnCloseLibrary" aria-label="关闭桌宠库">关闭</button></div>
+  <div class="library-head"><strong>桌宠库</strong><span><button id="btnOpenFolder">打开文件夹</button><button id="btnCloseLibrary" aria-label="关闭桌宠库">关闭</button></span></div>
   <div id="petList" aria-live="polite"></div>
   <div class="library-actions">
     <button id="btnSavePet">保存当前桌宠</button>
@@ -157,7 +158,7 @@
     mode: "idle", nextDecisionAt: Date.now() + 3000,
     lastInteractionAt: Date.now(), dragging: false, dragOffsetX: 0,
     hopV: 0, hopY: 0, remoteOverride: null,
-    lookAtMouse: false, workPhase: null, pokeUntil: 0
+    lookAtCopilot: false, workPhase: null, pokeUntil: 0
   };
 
   // 特殊动画别名（与 state.mjs ANIM_ALIASES 对齐）：按顺序取第一个已定义的
@@ -266,7 +267,7 @@
     if (Date.now() < pet.pokeUntil) { var b = animAlias("poke"); if (b) return b; }
     if (pet.workPhase === "thinking") { var c = animAlias("thinking"); if (c) return c; }
     if (pet.workPhase) { var d = animAlias("tool"); if (d) return d; }
-    if (pet.lookAtMouse) { var e = animAlias("look"); if (e) return e; }
+    if (pet.lookAtCopilot) { var e = animAlias("look"); if (e) return e; }
     if (pet.mode === "walk") { var f = animAlias("walk"); if (f) return f; }
     if (pet.mode === "sleep") { var g = animAlias("sleep"); if (g) return g; }
     return config.animations[pet.anim] ? pet.anim : (config.defaultAnimation || "idle");
@@ -467,6 +468,12 @@
 
   btnLibrary.addEventListener("click", function () { setLibraryOpen(library.hidden); });
   document.getElementById("btnCloseLibrary").addEventListener("click", function () { setLibraryOpen(false); });
+  document.getElementById("btnOpenFolder").addEventListener("click", function () {
+    fetch("/api/open_folder", { method: "POST" })
+      .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "打开失败"); return d; }); })
+      .then(function (d) { setLibraryHint("已打开文件夹：" + d.path, false); })
+      .catch(function (e) { setLibraryHint(e.message, true); });
+  });
   document.getElementById("btnSavePet").addEventListener("click", function () {
     fetch("/api/pets/save", { method: "POST" })
       .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "保存失败"); return d; }); })
@@ -530,8 +537,8 @@
   });
 
   chkLook.addEventListener("change", function () {
-    pet.lookAtMouse = chkLook.checked;
-    fetch("/api/look_at_mouse", {
+    pet.lookAtCopilot = chkLook.checked;
+    fetch("/api/look_at_copilot", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ enabled: chkLook.checked })
@@ -548,9 +555,9 @@
     pet.remoteOverride = s.animation || null;
     if (s.animation) ensureAnimOption(s.animation);
     if (animSelect.value !== (s.animation || "")) animSelect.value = s.animation || "";
-    if (typeof s.lookAtMouse === "boolean") {
-      pet.lookAtMouse = s.lookAtMouse;
-      if (chkLook.checked !== s.lookAtMouse) chkLook.checked = s.lookAtMouse;
+    if (typeof s.lookAtCopilot === "boolean") {
+      pet.lookAtCopilot = s.lookAtCopilot;
+      if (chkLook.checked !== s.lookAtCopilot) chkLook.checked = s.lookAtCopilot;
     }
     pet.workPhase = s.activity === "working" ? (s.workPhase || "tool") : null;
     if (s.message && s.message !== remoteMessage) {

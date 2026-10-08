@@ -9,17 +9,17 @@
 - 🖥️ 真·桌面悬浮窗（WPF 透明置顶）：走动 / 睡觉 / 跳跃 / 挥手 / 工作 / 思考 / 复盘
 - 💬 戳一戳随机冒泡说话；agent 可让桌宠说任意内容
 - 🗨️ **右键「聊天…」**：直接在桌宠气泡里跟 Copilot 对话，不用切窗口
-- 👀 **右键「看着鼠标」**：桌宠实时转头看向鼠标位置（左右转头 / 抬头低头 / 镜像翻转）
+- 👀 **右键「看着对话框」**：桌宠实时转头看向 Copilot 对话框窗口（左右转头 / 抬头低头 / 镜像翻转）
 - 🔗 会话联动：agent 跑工具时坐下敲电脑（🛠），**模型推理时换「思考中」动画（💭）**，
   任务完成自动复盘汇报
 - 🎬 收场动画分得清：**主动结束（你点了停止）**演 `aborted`，**异常结束（会话报错）**演 `error`，
-  正常完成演 `review`；拖拽 / 戳 / 聊天 / 看鼠标各有专属动画
+  正常完成演 `review`；拖拽 / 戳 / 聊天 / 看对话框各有专属动画
 - ⚡ 低延迟：会话事件（含 `session.idle`）直接推给桌宠，叠加 SSE 推送，收工/开工几乎无感延迟
 - 🌐 跨会话感知：任意一个 Copilot 会话在工作，桌宠都知道（心跳注册表 + 事件日志双重检测）
 - 🩹 崩溃自愈：扩展异常不再静默退出，先演一段 `error`（回退 `failed`）动画再自愈；桌面窗连不上扩展也不再自杀
 - 🔌 外部事件监听（可选）：不开 Copilot 也能用本机 HTTP 推送 working/idle，桌宠照样联动
 - 🚀 打开 Copilot 自动召唤（`autoStart`）
-- 🎛️ 画布面板：预览动画、选动画、开关「看鼠标」、召唤 / 收回桌宠
+- 🎛️ 画布面板：预览动画、选动画、开关「看对话框」、召唤 / 收回桌宠、一键打开桌宠库文件夹
 - 🎨 配置驱动换装：一张 spritesheet + 一个 `pet.json` 就是一只新桌宠
 
 ## 安装
@@ -36,7 +36,8 @@
 - 「召唤桌宠」/「收回桌宠」
 - 「让桌宠说：……」
 - 「让桌宠播 xxx 动画」/「恢复自动行为」
-- 「让桌宠看着鼠标」/「别看了」（`desktop_pet_look_at_mouse`）
+- 「让桌宠看着对话框」/「别看了」（`desktop_pet_look_at_copilot`）
+- 「打开桌宠库文件夹」/「打开桌宠文件夹」
 
 手动启动：**双击 `start-pet.bat`**（或 `powershell -File start-pet.ps1`）。
 脚本会自动判断：已经在跑就提示不重复召唤；有 Copilot 会话加载了扩展就让该实例召唤
@@ -49,7 +50,8 @@
 - 左键拖拽移动（拖拽时演 `drag`）；单击（不拖动）戳一戳说话并演 `poke`
 - 右键菜单：
   - **聊天…**：弹出桌宠聊天窗，输入的话会发给当前 Copilot 会话，回复显示在气泡里
-  - **看着鼠标 开/关**：桌宠实时转头看向鼠标位置
+  - **看着对话框 开/关**：桌宠实时转头看向 Copilot 对话框窗口（找不到窗口时保持默认朝向，窗口出现后自动跟上）
+  - **打开桌宠库文件夹**：在资源管理器里打开 `%APPDATA%\copilot-desktop-pet\pets`
   - **动画 ▸**：手动指定播放某个动画（含「自动」恢复自动行为）
   - 打开设置（桌宠库：切换 / 导入 / 保存）、开关自动走动、让它睡觉、退出
 
@@ -137,7 +139,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:38888/api/idle"    -Conten
     "walkSpeedPxPerSec": 60,
     "wanderIntervalSec": [4, 9],
     "sleepAfterIdleSec": 40,
-    "lookAtMouse": false
+    "lookAtCopilot": false
   },
   "speech": {
     "phrases": ["……什么事？", "嗯，我在。", "别戳了。"],
@@ -187,7 +189,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:38888/api/idle"    -Conten
 | `thinking` | **agent 在推理/思考**（收到消息、回合开始、`assistant.reasoning` 等，还没开始跑工具） |
 | `work` | **任意会话的 agent 正在跑工具时** |
 | `chat` | 正在跟桌宠聊天（等回复期间） |
-| `look` | 开启「看着鼠标」并且鼠标在桌宠附近时 |
+| `look` | 开启「看着对话框」并且找得到 Copilot 对话框窗口时 |
 | `drag` | 正在被拖动 |
 | `poke` | 刚被戳了一下（约 1.2 秒） |
 | `review` | 一次任务**正常跑完**（`session.idle` 且非主动中止），自动演 6 秒 |
@@ -214,7 +216,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:38888/api/idle"    -Conten
 | `walkSpeedPxPerSec` | 40 | 走动速度（像素/秒） |
 | `wanderIntervalSec` | `[3, 8]` | 行为切换间隔 `[最小, 最大]` 秒 |
 | `sleepAfterIdleSec` | 45 | 无交互多少秒后睡觉（0 = 不睡） |
-| `lookAtMouse` | false | 是否让桌宠实时看着鼠标（也可用右键菜单或面板复选框随时切换） |
+| `lookAtCopilot` | false | 是否让桌宠实时看着 Copilot 对话框窗口（也可用右键菜单或面板复选框随时切换） |
 
 ### externalEvents（外部事件）
 
@@ -262,7 +264,7 @@ extension.mjs    扩展入口：agent tools + 画布面板 + 本地 HTTP 服务
                  + 跨会话心跳注册表（%TEMP%\copilot-desktop-pet）+ 桌面窗进程管理
 state.mjs        桌宠状态机与纯逻辑（可单测，无 IO）
 pet-window.ps1   桌面悬浮窗本体（WPF 透明置顶窗，动画状态机，配置热重载，断连保活）
-pet.html         画布面板：预览动画 + 选动画 + 看鼠标开关 + 召唤/收回控制栏
+pet.html         画布面板：预览动画 + 选动画 + 看对话框开关 + 召唤/收回控制栏 + 打开桌宠库文件夹
 pet.example.json 示例配置
 tests/           零依赖测试（node --test）
 ```
@@ -271,12 +273,13 @@ tests/           零依赖测试（node --test）
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/state` | 当前状态 `{ animation, message, activity, activitySource, workPhase, lookAtMouse, running, sessions, crashed, pollIntervalMs, externalEvents, pid }`（`workPhase` 为 `thinking` / `tool` / `null`） |
+| `GET /api/state` | 当前状态 `{ animation, message, activity, activitySource, workPhase, lookAtCopilot, running, sessions, crashed, pollIntervalMs, externalEvents, pid }`（`workPhase` 为 `thinking` / `tool` / `null`） |
 | `GET /api/events` | SSE 状态流（`event: state`），状态一变就推 |
 | `GET /api/sessions` | 各会话心跳：pid、activity、桌宠 pid、服务端口 |
 | `POST /api/say` / `POST /api/animation` / `POST /api/reload` | 说话 / 切动画 / 重载配置 |
 | `POST /api/chat` | 跟桌宠聊天，`{ "text": "..." }`（也接受 `message`）。回复里带 `reply`；输入空 → 400，正在回 → 429，没有可用会话 → 503，超时/报错 → 504（三种失败都会冒泡离线台词） |
-| `POST /api/look_at_mouse` | `{ "enabled": true/false }` 开关「看着鼠标」；不传 `enabled` 则切换 |
+| `POST /api/look_at_copilot` | `{ "enabled": true/false }` 开关「看着对话框」；不传 `enabled` 则切换 |
+| `POST /api/open_folder` | 在资源管理器中打开桌宠库文件夹（`%APPDATA%\copilot-desktop-pet\pets`，路径固定不接受外部输入），返回 `{ ok, path }` |
 | `POST /api/pet/show` / `hide` / `toggle` | 召唤 / 收回 / 切换桌宠 |
 | `GET /api/pets`；`POST /api/pets/save` / `import` / `activate` | 桌宠库：列表 / 保存当前 / 导入（JSON+贴图 base64）/ 切换 |
 | `POST /api/working` / `idle` / `activity` | 外部事件推送（需开启 `externalEvents`；`activity` 接受 `{ "activity": "working" \| "idle" }`） |
