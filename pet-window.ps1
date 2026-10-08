@@ -86,9 +86,77 @@ public static class PetChatBridge
 "@
 }
 
+# 找 Copilot 对话框窗口 + 算桌宠该朝哪边看：纯 Win32 取窗口矩形，
+# 避免 WPF 的 DIP 与 Cursor.Position/GetWindowRect 的物理像素混算
+if (-not ("PetWin32" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class PetWin32
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    private delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder s, int max);
+    [DllImport("user32.dll")] private static extern int GetWindowTextLengthW(IntPtr hWnd);
+
+    // 可见、未最小化、标题含 "copilot" 的顶层窗口里挑面积最大的那个。
+    // 桌宠自己标题为空、聊天窗标题是「聊天」，都不会误命中。
+    public static IntPtr FindCopilotWindow()
+    {
+        IntPtr best = IntPtr.Zero;
+        long bestArea = 0;
+        EnumProc cb = delegate(IntPtr h, IntPtr p)
+        {
+            if (!IsWindowVisible(h) || IsIconic(h)) return true;
+            int len = GetWindowTextLengthW(h);
+            if (len <= 0 || len > 512) return true;
+            var sb = new StringBuilder(len + 1);
+            GetWindowTextW(h, sb, sb.Capacity);
+            if (sb.ToString().IndexOf("copilot", StringComparison.OrdinalIgnoreCase) < 0) return true;
+            RECT r;
+            if (!GetWindowRect(h, out r)) return true;
+            long area = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
+            if (area > bestArea) { bestArea = area; best = h; }
+            return true;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        return best;
+    }
+
+    // 从 self 窗口中心指向 Copilot 窗口矩形最近点的向量（物理像素）。
+    // 找不到 Copilot 窗口返回 null；桌宠正好在对话框范围内返回 {0,0}（保持默认朝向）。
+    public static int[] LookVector(IntPtr self)
+    {
+        IntPtr h = FindCopilotWindow();
+        if (h == IntPtr.Zero) return null;
+        RECT me, r;
+        if (!GetWindowRect(self, out me)) return null;
+        if (!GetWindowRect(h, out r)) return null;
+        if (r.Right <= r.Left || r.Bottom <= r.Top) return null;
+        double cx = (me.Left + me.Right) / 2.0;
+        double cy = (me.Top + me.Bottom) / 2.0;
+        double tx = Math.Min(Math.Max(cx, (double)r.Left), (double)r.Right);
+        double ty = Math.Min(Math.Max(cy, (double)r.Top), (double)r.Bottom);
+        return new int[] { (int)Math.Round(tx - cx), (int)Math.Round(ty - cy) };
+    }
+}
+'@
+}
+
 $script:configPath = Join-Path $DataDir "pet.json"
 $legacyConfigPath = Join-Path $ExtDir "pet.json"
 $legacyPetsPath = Join-Path $ExtDir "pets"
+$script:petsPath = Join-Path $DataDir "pets"
 if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
 if (-not (Test-Path $script:configPath) -and (Test-Path $legacyConfigPath)) {
     Copy-Item $legacyConfigPath $script:configPath -ErrorAction SilentlyContinue
@@ -237,8 +305,10 @@ $script:disconnNotified = $false   # 同一段断连只提示一次
 $script:configWriteTime = (Get-Item $script:configPath).LastWriteTime
 $script:autoWander = $true
 try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
-$script:lookAtMouse = $false
-try { $script:lookAtMouse = [bool]$script:cfg.behavior.lookAtMouse } catch {}
+$script:lookAtCopilot = $false
+try { $script:lookAtCopilot = [bool]$script:cfg.behavior.lookAtCopilot } catch {}
+$script:lookTarget = $null         # { found; dx; dy }：桌宠到 Copilot 对话框的方向（缓存）
+$script:lookTargetAt = [DateTime]::MinValue
 $script:dragging = $false          # 拖着桌宠走 → drag 动画
 $script:pokeUntil = [DateTime]::MinValue   # 戳一下 → poke 动画（短时）
 $script:downPos = New-Object System.Drawing.Point(0, 0)
@@ -348,7 +418,7 @@ function Resolve-AnimName {
     if ($script:chatBusy -or $script:chatOpen) {
         $n = Get-AnimAlias "chat"; if ($n) { return $n }
     }
-    if ($script:lookAtMouse) {
+    if ($script:lookAtCopilot -and $script:lookTarget -and $script:lookTarget.found) {
         $n = Get-AnimAlias "look"; if ($n) { return $n }
     }
     if ($script:mode -eq "sleep") {
@@ -362,12 +432,21 @@ function Resolve-AnimName {
     return "idle"
 }
 
-# 光标相对桌宠中心的方向（看着鼠标时用来选行）
-function Get-LookTarget {
-    $cur = [System.Windows.Forms.Cursor]::Position
-    return @{
-        dx = $cur.X - ($window.Left + $window.Width / 2.0)
-        dy = $cur.Y - ($window.Top + $window.Height / 2.0)
+# 桌宠到 Copilot 对话框的方向（看着对话框时用来选行）；250ms 内复用缓存，
+# 免得每帧都枚举一次顶层窗口
+function Update-LookTarget {
+    $now = Get-Date
+    if ($null -ne $script:lookTarget -and ($now - $script:lookTargetAt).TotalMilliseconds -lt 250) { return }
+    $script:lookTargetAt = $now
+    $v = $null
+    try {
+        $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+        if ($hwnd -ne [IntPtr]::Zero) { $v = [PetWin32]::LookVector($hwnd) }
+    } catch { $v = $null }
+    if ($null -eq $v -or $v.Length -lt 2) {
+        $script:lookTarget = @{ found = $false; dx = 0.0; dy = 0.0 }
+    } else {
+        $script:lookTarget = @{ found = $true; dx = [double]$v[0]; dy = [double]$v[1] }
     }
 }
 
@@ -419,9 +498,10 @@ function Update-SpriteFrame {
     }
     $script:frame = ($script:frame + 1) % $frames
     $flip = $script:dir
-    if ($script:lookAtMouse -and $animName -eq "look" -and $null -ne $anim) {
-        # 看鼠标：按光标方向选行；贴图没给 upRow/downRow/leftRow 就复用 row / 水平镜像
-        $t = Get-LookTarget
+    if ($script:lookAtCopilot -and $animName -eq "look" -and $null -ne $anim) {
+        # 看对话框：按对话框方向选行；贴图没给 upRow/downRow/leftRow 就复用 row / 水平镜像
+        $t = $script:lookTarget
+        if ($null -eq $t) { $t = @{ found = $false; dx = 0.0; dy = 0.0 } }
         if ([Math]::Abs($t.dx) -ge [Math]::Abs($t.dy)) {
             if ($t.dx -lt 0) {
                 if ($null -ne $anim.leftRow) { $row = [int]$anim.leftRow; $flip = 1 } else { $flip = -1 }
@@ -456,8 +536,8 @@ function Decide {
     if ($span -lt 1) { $span = 10 }
     $script:nextDecision = (Get-Date).AddSeconds($min + (Get-Random -Minimum 0 -Maximum $span) / 10.0)
 
-    # 看着鼠标：专心盯光标，不走动也不睡
-    if ($script:lookAtMouse) { $script:mode = "idle"; return }
+    # 看着对话框：专心盯对话框，不走动也不睡
+    if ($script:lookAtCopilot) { $script:mode = "idle"; return }
 
     if (-not $script:autoWander) { $script:mode = "idle"; return }
     if ($script:activity -eq "working" -and (Get-AnimDef "work")) {
@@ -491,6 +571,8 @@ $animTimer.Add_Tick({
     $dt = ($now - $script:lastTick).TotalSeconds
     $script:lastTick = $now
     if ($dt -gt 0.1) { $dt = 0.1 }
+
+    if ($script:lookAtCopilot) { Update-LookTarget }
 
     Update-SpriteFrame
 
@@ -591,8 +673,8 @@ $pollTimer.Add_Tick({
             $script:workPhase = $null
             $badge.Visibility = "Collapsed"
         }
-        # 看着鼠标：以服务端状态为准（右键菜单 / agent 工具 / 面板都能改）
-        if ($null -ne $s.lookAtMouse) { $script:lookAtMouse = [bool]$s.lookAtMouse }
+        # 看着对话框：以服务端状态为准（右键菜单 / agent 工具 / 面板都能改）
+        if ($null -ne $s.lookAtCopilot) { $script:lookAtCopilot = [bool]$s.lookAtCopilot }
     } catch {
         # 连接中断：绝不关窗自杀（原 failCount>=10 的自动退出已删除），进程始终不退，只降频重试
         $script:failCount += 1
@@ -850,6 +932,18 @@ $itemSettings.Add_Click({
 })
 $menu.Items.Add($itemSettings) | Out-Null
 
+$itemFolder = New-Object System.Windows.Controls.MenuItem
+$itemFolder.Header = "打开桌宠库文件夹"
+$itemFolder.Add_Click({
+    try {
+        if (-not (Test-Path $script:petsPath)) { New-Item -ItemType Directory -Path $script:petsPath -Force | Out-Null }
+        Start-Process explorer.exe $script:petsPath
+    } catch {
+        Show-Bubble ("打不开桌宠库文件夹：" + $_.Exception.Message) 4500
+    }
+})
+$menu.Items.Add($itemFolder) | Out-Null
+
 $itemChat = New-Object System.Windows.Controls.MenuItem
 $itemChat.Header = "聊天…"
 $itemChat.Add_Click({ Show-ChatWindow })
@@ -862,22 +956,26 @@ $itemWander.Header = "自动走动 开/关"
 $itemWander.Add_Click({ $script:autoWander = -not $script:autoWander })
 $menu.Items.Add($itemWander) | Out-Null
 
-# 看着鼠标：有扩展实例时以服务端状态为准（面板/agent 工具也改得动），独立模式则本地切换
+# 看着对话框：有扩展实例时以服务端状态为准（面板/agent 工具也改得动），独立模式则本地切换
 $itemLook = New-Object System.Windows.Controls.MenuItem
-$itemLook.Header = "看着鼠标 开/关"
+$itemLook.Header = "看着对话框 开/关"
 $itemLook.Add_Click({
-    $want = -not $script:lookAtMouse
+    $want = -not $script:lookAtCopilot
     $url = Get-PanelUrl
     if ($url -ne "") {
         try {
             $body = '{"enabled":' + $want.ToString().ToLower() + '}'
-            $r = Invoke-RestMethod -Uri ($url + "api/look_at_mouse") -Method Post -ContentType "application/json" -Body $body -TimeoutSec 3
-            if ($null -ne $r.lookAtMouse) { $want = [bool]$r.lookAtMouse }
+            $r = Invoke-RestMethod -Uri ($url + "api/look_at_copilot") -Method Post -ContentType "application/json" -Body $body -TimeoutSec 3
+            if ($null -ne $r.lookAtCopilot) { $want = [bool]$r.lookAtCopilot }
         } catch {}
     }
-    $script:lookAtMouse = $want
+    $script:lookAtCopilot = $want
+    if ($want) { $script:lookTarget = $null; Update-LookTarget }
     $script:lastInteraction = Get-Date
-    if ($want) { Show-Bubble "盯着鼠标看～" 1800 }
+    if ($want) {
+        if ($script:lookTarget -and $script:lookTarget.found) { Show-Bubble "盯着对话框看～" 1800 }
+        else { Show-Bubble "没找到 Copilot 对话框，等它出现～" 1800 }
+    }
 })
 $menu.Items.Add($itemLook) | Out-Null
 

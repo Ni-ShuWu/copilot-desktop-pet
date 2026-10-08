@@ -13,7 +13,7 @@ export const DEFAULT_CONFIG = {
     fps: 8,
     defaultAnimation: "idle",
     animations: { idle: { row: 0, frames: 4 } },
-    behavior: { autoWander: true, walkSpeedPxPerSec: 40, wanderIntervalSec: [3, 8], sleepAfterIdleSec: 45, lookAtMouse: false },
+    behavior: { autoWander: true, walkSpeedPxPerSec: 40, wanderIntervalSec: [3, 8], sleepAfterIdleSec: 45, lookAtCopilot: false },
     speech: { phrases: ["(◕‿◕)"], fontSize: 13 },
     // 聊天：消息发给当前 Copilot 会话，回复由桌宠说出来
     chat: {
@@ -102,7 +102,7 @@ export function createPetState(now) {
         activityAt: now || 0,
         explicitIdleUntil: 0, // 兜底抑制截止时间戳
         workPhase: null,      // working 期间的细分：thinking | tool
-        lookAtMouse: false,   // 看着鼠标模式（桌面窗据此让桌宠朝光标转头）
+        lookAtCopilot: false, // 看着对话框模式（桌面窗据此让桌宠朝 Copilot 对话框转头）
         crashed: false,
     };
 }
@@ -176,10 +176,10 @@ export function pickPhrase(list, random) {
     return list[Math.floor(rnd() * list.length)];
 }
 
-// 看着鼠标：不传 enabled（或传 null）即取反
-export function setLookAtMouse(state, enabled) {
-    state.lookAtMouse = (enabled === undefined || enabled === null) ? !state.lookAtMouse : !!enabled;
-    return { ok: true, lookAtMouse: state.lookAtMouse };
+// 看着 Copilot 对话框：不传 enabled（或传 null）即取反
+export function setLookAtCopilot(state, enabled) {
+    state.lookAtCopilot = (enabled === undefined || enabled === null) ? !state.lookAtCopilot : !!enabled;
+    return { ok: true, lookAtCopilot: state.lookAtCopilot };
 }
 
 // working 细分阶段：thinking（模型在想）/ tool（在跑工具）

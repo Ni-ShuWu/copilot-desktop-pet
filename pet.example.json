@@ -28,7 +28,7 @@
     "walkSpeedPxPerSec": 40,
     "wanderIntervalSec": [3, 8],
     "sleepAfterIdleSec": 45,
-    "lookAtMouse": false
+    "lookAtCopilot": false
   },
   "speech": {
     "phrases": ["(◕‿◕)", "喵？", "戳我干嘛~"],

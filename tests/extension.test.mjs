@@ -37,6 +37,8 @@ async function boot(t, opts) {
                 // 让 SDK stub 的会话事件控制通道与聊天留档都落在沙箱内
                 PET_TEST_EVENTS_FILE: sdkEventFile(sb.dir),
                 PET_TEST_CHAT_LOG: path.join(sb.dir, "tmp", "chat-log.jsonl"),
+                // 测试环境不真的拉起资源管理器
+                PET_TEST_NO_SHELL: "1",
             }, o.env || {}),
         });
     } catch (err) {
@@ -415,32 +417,32 @@ test("13. 启动时将旧宠物库无覆盖迁移至 AppData", async (t) => {
     assert.equal((await ext.request("GET", "/legacy.png")).status, 200);
 });
 
-test("14. POST /api/look_at_mouse：显式开关、缺省取反、状态与 SSE 同步", async (t) => {
+test("14. POST /api/look_at_copilot：显式开关、缺省取反、状态与 SSE 同步", async (t) => {
     const ext = await boot(t, {});
 
-    assert.equal((await ext.request("GET", "/api/state")).json.lookAtMouse, false, "默认不看鼠标");
+    assert.equal((await ext.request("GET", "/api/state")).json.lookAtCopilot, false, "默认不看对话框");
 
-    const on = await ext.request("POST", "/api/look_at_mouse", { body: { enabled: true } });
+    const on = await ext.request("POST", "/api/look_at_copilot", { body: { enabled: true } });
     assert.equal(on.status, 200);
-    assert.deepEqual(on.json, { ok: true, lookAtMouse: true });
-    assert.equal((await ext.request("GET", "/api/state")).json.lookAtMouse, true);
+    assert.deepEqual(on.json, { ok: true, lookAtCopilot: true });
+    assert.equal((await ext.request("GET", "/api/state")).json.lookAtCopilot, true);
 
     const sse = await openSSE(ext.port);
     t.after(() => sse.close());
     await sse.waitForEvent((e) => e.event === "state", 5000);
 
-    const off = await ext.request("POST", "/api/look_at_mouse", { body: { enabled: false } });
-    assert.deepEqual(off.json, { ok: true, lookAtMouse: false });
-    const pushed = await sse.waitForEvent((e) => e.event === "state" && e.parsed && e.parsed.lookAtMouse === false, 8000);
-    assert.equal(pushed[0].parsed.lookAtMouse, false);
+    const off = await ext.request("POST", "/api/look_at_copilot", { body: { enabled: false } });
+    assert.deepEqual(off.json, { ok: true, lookAtCopilot: false });
+    const pushed = await sse.waitForEvent((e) => e.event === "state" && e.parsed && e.parsed.lookAtCopilot === false, 8000);
+    assert.equal(pushed[0].parsed.lookAtCopilot, false);
 
     // 缺省 enabled 即取反（右键菜单的「开/关」一键切换）
-    const toggled = await ext.request("POST", "/api/look_at_mouse", { body: {} });
-    assert.deepEqual(toggled.json, { ok: true, lookAtMouse: true });
-    const again = await ext.request("POST", "/api/look_at_mouse", { body: {} });
-    assert.deepEqual(again.json, { ok: true, lookAtMouse: false });
+    const toggled = await ext.request("POST", "/api/look_at_copilot", { body: {} });
+    assert.deepEqual(toggled.json, { ok: true, lookAtCopilot: true });
+    const again = await ext.request("POST", "/api/look_at_copilot", { body: {} });
+    assert.deepEqual(again.json, { ok: true, lookAtCopilot: false });
 
-    const bad = await ext.request("POST", "/api/look_at_mouse", { body: "{" });
+    const bad = await ext.request("POST", "/api/look_at_copilot", { body: "{" });
     assert.equal(bad.status, 400);
 });
 
@@ -587,4 +589,18 @@ test("19. 特殊动画别名：崩溃演配置里的 error 动画（thinking/cha
         return r.json && r.json.crashed ? r.json : null;
     }, { timeoutMs: 6000, intervalMs: 50, label: "crashed=true (failed 别名)" });
     assert.equal(crashed2.animation, "failed");
+});
+test("20. POST /api/open_folder：打开桌宠库文件夹（固定路径，不接受外部输入）", async (t) => {
+    const ext = await boot(t, {});
+    const r = await ext.request("POST", "/api/open_folder", { body: {} });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true);
+    assert.ok(path.isAbsolute(r.json.path), "返回绝对路径");
+    assert.equal(path.basename(r.json.path), "pets");
+    assert.ok(r.json.path.includes("copilot-desktop-pet"), "路径固定在数据目录下");
+    assert.equal((await stat(r.json.path)).isDirectory(), true, "目录不存在时会先建出来");
+
+    // 路径不可由请求体左右：塞什么都不影响结果
+    const r2 = await ext.request("POST", "/api/open_folder", { body: { path: "C:\\Windows" } });
+    assert.equal(r2.json.path, r.json.path);
 });
