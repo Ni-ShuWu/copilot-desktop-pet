@@ -11,6 +11,7 @@ public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
 '@
     }
     $script:petFound = $false
@@ -23,7 +24,10 @@ public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
             if ($proc -and $proc.ProcessName -eq 'powershell') {
                 $cls = New-Object System.Text.StringBuilder 512
                 [void][PetLauncher.Win]::GetClassName($h, $cls, 512)
-                if ($cls.ToString().StartsWith('HwndWrapper[DefaultDomain;Pipeline Execution Thread;')) { $script:petFound = $true }
+                $title = New-Object System.Text.StringBuilder 512
+                [void][PetLauncher.Win]::GetWindowText($h, $title, 512)
+                # Settings/chat windows share the WPF class but are not the pet.
+                if ($cls.ToString().StartsWith('HwndWrapper[DefaultDomain;Pipeline Execution Thread;') -and ($title.Length -eq 0 -or $title.ToString() -eq 'Copilot Desktop Pet')) { $script:petFound = $true }
             }
         }
         return $true
@@ -80,6 +84,6 @@ if (-not (Test-Path $win)) {
     Write-Host "找不到 pet-window.ps1（期望位置：$win）" -ForegroundColor Red
     exit 1
 }
-Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $win
+Start-Process powershell -WindowStyle Hidden -ArgumentList ('-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $win + '"')
 Write-Host '桌宠已召唤（独立模式：检测 Copilot App 运行并读取会话事件联动状态）。' -ForegroundColor Green
 exit 0
