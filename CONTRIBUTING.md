@@ -14,10 +14,6 @@
 |---|---|
 | `extension.mjs` | 扩展入口：agent tools、画布面板、本地 HTTP 服务、会话事件联动、崩溃自愈、跨会话心跳 |
 | `state.mjs` | 桌宠状态机与纯逻辑（无 IO，便于单测） |
-| `config-store.mjs` / `pet-data.ps1` | 扩展 / 独立窗口共享的配置来源哈希协议和数据操作 |
-| `pet-settings.ps1` | 原生 Windows 桌宠库设置与预览 |
-| `pet-win32.cs` | 进程身份窗口识别、后台 UI Automation 输入框定位 |
-| `assets/` | 内置 Octocat 的配置、原图和来源说明 |
 | `pet-window.ps1` | 桌面悬浮窗与动画状态机（含断连保活） |
 | `pet.html` | 画布预览面板 |
 | `pet.example.json` | 示例配置 |
@@ -39,7 +35,6 @@
 - 新增配置项须同步更新 `README.md` 与 `pet.example.json`
 - 不要提交 `pet.json`、个人贴图等本地文件（已在 `.gitignore`）
 - 文本文件统一使用 UTF-8 编码
-- PowerShell 文件使用 UTF-8 **带 BOM**，以兼容 Windows PowerShell 5.1 的中文读取
 - 本项目无法在移动端（安卓、鸿蒙、iOS）进行测试，请勿提交移动端相关代码
     - 本项目拒绝移动端AI代理执行器
 - 提交代码请确保在`Windows 10/11` `Mac OS` `Linux` 三个平台其中之一可以正常运行
@@ -54,9 +49,6 @@ node --check extension.mjs
 
 `tests/extension.test.mjs` 会在临时目录里生成 `@github/copilot-sdk` 桩并真正拉起扩展进程，
 所以本地不需要安装 Copilot 也能跑（覆盖 HTTP 接口、外部事件、崩溃自愈、SSE）。
-Windows 上还会运行 `tests/windows.test.mjs`：使用 PowerShell 5.1 编译窗口定位代码、
-验证原生库操作，并创建测试用 Copilot 进程窗口（标题为会话名）验证窗口/输入框定位。
-其他系统跳过该 Windows 专用用例。测试数据均在临时目录内，不写入用户桌宠库。
 
 ## 提交前自检
 
@@ -78,6 +70,13 @@ Closes #编号
 ## 测试
 - [x] 本地验证通过（写明操作系统与 AI 模型，如 Windows 11 + GitHub Copilot CLI）
 - [x] `npm test` 通过
+
+### 可选测试
+- [x] 其他会话联动验证通过
+- [x] 桌宠行为验证通过（召唤、收回、走动、睡眠）
+- [x] 文档更新验证通过（新增配置项须同步 `README.md` 与 `pet.example.json`）
+- [x] 我没有`GitHub Copilot App`应用，需要维护者帮我验证
+```
 
 ## 破坏性变更
 无 / 有：（说明影响与迁移方式）
