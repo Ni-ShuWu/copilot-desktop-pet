@@ -20,6 +20,73 @@ const BASE_PET = {
     externalEvents: { enabled: false, port: 0, token: "" },
 };
 
+test("issue #8: 旧目录 JSON 修改在热更新和重启后同步，错误 JSON 保留上一份配置", async (t) => {
+    const ext = await boot(t, {});
+    const cfg = Object.assign({}, BASE_PET, { name: "旧目录的新配置", sprite: "spritesheet.png",
+        scale: 2, behavior: { autoWander: false, lookAtCopilot: true } });
+    await writeFile(path.join(ext.dir, "pet.json"), "\uFEFF" + JSON.stringify(cfg));
+    const changed = await ext.request("GET", "/pet.json");
+    assert.equal(changed.json.name, cfg.name);
+    assert.equal(changed.json.scale, 2);
+    assert.equal((await ext.request("GET", "/api/state")).json.lookAtCopilot, true);
+    await writeFile(path.join(ext.dir, "pet.json"), "{");
+    const invalid = await ext.request("GET", "/pet.json");
+    assert.ok(invalid.json._error);
+    assert.equal(invalid.json.name, cfg.name);
+    await writeFile(path.join(ext.dir, "pet.json"), JSON.stringify({ ...cfg, name: "修正后的配置" }));
+    assert.equal((await ext.request("GET", "/pet.json")).json.name, "修正后的配置");
+    await ext.stop();
+    await writeFile(path.join(ext.dir, "pet.json"), JSON.stringify({ ...cfg, name: "停机时修改" }));
+    const restarted = await startExtension({ dir: ext.dir, env: { PET_HTTP_PORT: String(ext.port), PET_TEST_NO_SHELL: "1" } });
+    try { assert.equal((await restarted.request("GET", "/pet.json")).json.name, "停机时修改"); }
+    finally { await restarted.stop(); }
+});
+
+test("issue #8: 活动桌宠库 JSON 热改生效，直接修改工作副本不会被旧库配置覆盖", async (t) => {
+    const ext = await boot(t, {});
+    const sprite = await readFile(path.join(ext.dir, "assets", "octocat.png"));
+    const result = await ext.request("POST", "/api/pets/import", { body: {
+        config: { ...BASE_PET, frameWidth: 896, frameHeight: 896, name: "库内桌宠" },
+        spriteName: "pet.png", spriteData: sprite.toString("base64"),
+    } });
+    assert.equal(result.status, 200, result.text);
+    const root = path.join(ext.dir, "home", "AppData", "Roaming", "copilot-desktop-pet");
+    const libraryFile = path.join(root, "pets", result.json.pet.id, "pet.json");
+    const cfg = JSON.parse(await readFile(libraryFile, "utf8"));
+    await writeFile(libraryFile, JSON.stringify({ ...cfg, name: "库内改名", behavior: { lookAtCopilot: true } }));
+    assert.equal((await ext.request("GET", "/pet.json")).json.name, "库内改名");
+    assert.equal((await ext.request("GET", "/api/state")).json.lookAtCopilot, true);
+    const working = (await ext.request("GET", "/pet.json")).json;
+    await writeFile(path.join(root, "pet.json"), JSON.stringify({ ...working, name: "工作副本改名" }));
+    assert.equal((await ext.request("GET", "/pet.json")).json.name, "工作副本改名");
+    assert.equal((await ext.request("GET", "/pet.json")).json.name, "工作副本改名");
+    assert.equal((await ext.request("GET", "/api/pets")).json.activeId, result.json.pet.id);
+});
+
+test("issue #9: 内置默认桌宠、预览元数据、删除活动桌宠切换和最后一只保护", async (t) => {
+    const sb = await makeSandbox();
+    const port = await freePort();
+    const ext = await startExtension({ dir: sb.dir, env: { PET_HTTP_PORT: String(port), PET_TEST_NO_SHELL: "1" } });
+    t.after(async () => { await ext.stop(); await sb.cleanup(); });
+    const builtin = (await ext.request("GET", "/api/pets")).json;
+    assert.equal(builtin.pets.length, 1);
+    assert.equal(builtin.activeId, builtin.pets[0].id);
+    assert.equal(builtin.pets[0].frameWidth, 896);
+    assert.equal(builtin.pets[0].frames, 1);
+    const active = (await ext.request("GET", "/pet.json")).json;
+    assert.equal((await ext.request("GET", "/" + active.sprite.replace(/\\/g, "/"))).status, 200);
+    assert.equal((await ext.request("POST", "/api/pets/delete", { body: { id: builtin.activeId } })).status, 409);
+    const saved = await ext.request("POST", "/api/pets/save");
+    assert.equal(saved.status, 200, saved.text);
+    assert.equal((await ext.request("POST", "/api/pets/delete", { body: { id: "../outside" } })).status, 400);
+    assert.equal((await ext.request("POST", "/api/pets/delete", { body: { id: builtin.activeId } })).status, 200);
+    const next = (await ext.request("GET", "/api/pets")).json;
+    assert.equal(next.activeId, saved.json.pet.id);
+    assert.equal(next.pets.length, 1);
+    assert.equal((await ext.request("GET", "/pets/" + builtin.activeId + "/octocat.png")).status, 404);
+    assert.equal((await ext.request("GET", "/api/pets")).json.pets.length, 1, "删除内置桌宠后不应重新安装");
+});
+
 /** 起一个隔离沙箱 + 扩展进程；用例结束后自动清理进程与临时目录 */
 async function boot(t, opts) {
     const o = opts || {};
@@ -52,6 +119,29 @@ async function boot(t, opts) {
 function withExternal(pet, extra) {
     return Object.assign({}, pet, { externalEvents: Object.assign({ enabled: true, port: 0, token: "" }, extra || {}) });
 }
+
+test("两个会话共享配置和心跳：配置修改同时生效，工作状态跨会话可见", async (t) => {
+    const cfg = withExternal(BASE_PET);
+    const first = await boot(t, { pet: cfg });
+    const sb = await makeSandbox({ petJson: cfg });
+    const port = await freePort();
+    const appdata = path.join(first.dir, "home", "AppData", "Roaming");
+    let second;
+    try {
+        second = await startExtension({ dir: sb.dir, env: { PET_HTTP_PORT: String(port),
+            APPDATA: appdata, TEMP: path.join(first.dir, "tmp"), TMP: path.join(first.dir, "tmp") } });
+        const working = await first.request("POST", "/api/working", { body: {} });
+        assert.equal(working.status, 200);
+        await waitFor(async () => (await second.request("GET", "/api/state")).json.activity === "working",
+            { timeoutMs: 6000, label: "shared registry activity" });
+        const updated = { ...cfg, name: "两个会话都能看到", behavior: { lookAtCopilot: true } };
+        await writeFile(path.join(appdata, "copilot-desktop-pet", "pet.json"), JSON.stringify(updated));
+        for (const instance of [first, second]) {
+            assert.equal((await instance.request("GET", "/pet.json")).json.name, updated.name);
+            assert.equal((await instance.request("GET", "/api/state")).json.lookAtCopilot, true);
+        }
+    } finally { if (second) await second.stop(); await sb.cleanup(); }
+});
 
 test("1. GET /api/state：初始 idle，字段齐全", async (t) => {
     const ext = await boot(t, {});
@@ -383,7 +473,8 @@ test("12. 导入与切换桌宠只写入 AppData，扩展目录体积不增长",
 
     const listed = await ext.request("GET", "/api/pets");
     assert.equal(listed.status, 200);
-    assert.equal(listed.json.pets.length, 1);
+    assert.equal(listed.json.pets.length, 2, "导入的桌宠和内置 Octocat");
+    assert.ok(listed.json.pets.some((pet) => pet.id === imported.json.pet.id));
     const petDir = path.join(dataDir, "pets", imported.json.pet.id);
     assert.equal(JSON.parse(await readFile(path.join(petDir, "pet.json"), "utf8")).sprite, "spritesheet.png");
     assert.equal((await ext.request("GET", "/pets/" + imported.json.pet.id + "/spritesheet.png")).status, 200);
@@ -412,7 +503,7 @@ test("13. 启动时将旧宠物库无覆盖迁移至 AppData", async (t) => {
     assert.deepEqual(await readFile(path.join(dataDir, "legacy.png")), legacySprite);
     assert.deepEqual(await readFile(path.join(dataDir, "pets", legacyId, "legacy.png")), legacySprite);
     assert.deepEqual(JSON.parse(await readFile(path.join(dataDir, "pets", "active.json"), "utf8")), { id: legacyId });
-    assert.equal((await ext.request("GET", "/api/pets")).json.pets[0].id, legacyId);
+    assert.ok((await ext.request("GET", "/api/pets")).json.pets.some((pet) => pet.id === legacyId));
     assert.equal((await ext.request("GET", "/pets/" + legacyId + "/legacy.png")).status, 200);
     assert.equal((await ext.request("GET", "/legacy.png")).status, 200);
 });

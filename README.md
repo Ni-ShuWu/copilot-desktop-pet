@@ -25,8 +25,8 @@
 ## 安装
 
 1. 把本仓库全部文件复制到项目的 `.github/extensions/desktop-pet/` 目录下
-2. 复制 `pet.example.json` 为 `pet.json`，按下面「配置」一节修改
-3. 放入你自己的 `spritesheet.png` 贴图
+2. 可直接使用内置 Octocat；自定义桌宠时复制 `pet.example.json` 为 `pet.json`，按下面「配置」一节修改
+3. 自定义桌宠需放入对应贴图；请保留仓库的 `assets/` 目录和所有脚本文件
 4. 在 Copilot App 中重载扩展，打开「桌宠」画布，点「召唤桌宠」
 
 ## 使用
@@ -53,7 +53,8 @@
   - **看着对话框 开/关**：桌宠实时转头看向 Copilot 对话框窗口（找不到窗口时保持默认朝向，窗口出现后自动跟上）
   - **打开桌宠库文件夹**：在资源管理器里打开 `%APPDATA%\copilot-desktop-pet\pets`
   - **动画 ▸**：手动指定播放某个动画（含「自动」恢复自动行为）
-  - 打开设置（桌宠库：切换 / 导入 / 保存）、开关自动走动、让它睡觉、退出
+  - **打开设置**：独立的 Windows 原生窗口，支持预览 / 切换 / 导入 / 保存 / 删除；独立模式也可用
+  - 开关自动走动、让它睡觉、退出
 
 ### 跟桌宠聊天
 
@@ -73,11 +74,17 @@
 - **保存当前桌宠**：把当前 `pet.json` + 贴图保存到用户数据目录中的 `pets/<uuid>/`
 - **导入桌宠**：选一份配置 JSON + 对应的 spritesheet 图片（支持外部工具生成的
   `cell`/`row_counts` 记录格式，导入时自动归一化成 `frameWidth`/`frameHeight`/`animations`）
+- **选择顺序不限**：先选图片或先选 JSON 都可以；原生设置中选齐后点「导入并切换」，画布面板选齐后自动导入
+- **预览**：原生设置选择库内桌宠即可预览；画布库每只桌宠显示动画缩略图，导入后立即刷新
+- **删除**：确认后删除库内配置和贴图；删除当前桌宠时先切换到另一只，最后一只当前桌宠不能删除
 - **切换**：点库里的任意桌宠立即换装（更新用户数据目录中的活动配置，桌面窗热更新）
+- **默认桌宠**：首次安装内置 Octocat 章鱼猫；已有配置保留。默认素材为 GitHub Octodex 原图，单帧显示，走动和注视通过位移/镜像实现（素材来源及使用说明见 `assets/README.md`）
 
 桌宠配置和库数据存放在 `%APPDATA%\\copilot-desktop-pet\\`（包括 `pet.json`、`pets/`）。首次启动时会从扩展目录复制旧版 `pet.json`；不会把导入的贴图复制进扩展，因此宠物库不会占用 Copilot 扩展的 8 MiB 安装限额。原有扩展目录中的贴图仍可作为当前桌宠的回退来源。
 
-对应 HTTP API：`GET /api/pets`、`POST /api/pets/save` / `/api/pets/import` / `/api/pets/activate`。
+可直接运行 `powershell -NoProfile -STA -ExecutionPolicy Bypass -File pet-settings.ps1` 打开设置。
+
+对应 HTTP API：`GET /api/pets`、`POST /api/pets/save` / `/api/pets/import` / `/api/pets/activate` / `/api/pets/delete`（删除请求体为 `{ "id": "UUID" }`；最后一只当前桌宠返回 409）。
 
 扩展的 HTTP 服务默认固定监听 **10405** 端口（被占用时退回随机端口），
 外部工具可以按固定端口直接找到它；`PET_HTTP_PORT` 环境变量仍可覆盖。
@@ -105,6 +112,16 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:38888/api/idle"    -Conten
 ## 配置（pet.json）
 
 `pet.json` 是桌宠的全部定义，**改完无需重启**，桌面窗和面板几秒内自动热更新。
+
+推荐从原生设置的「编辑当前配置」打开 `%APPDATA%\copilot-desktop-pet\pet.json`。
+旧扩展目录的 `pet.json` 和当前激活的 `pets/<uuid>/pet.json` 修改也会同步到工作副本，重启后同样生效。
+来源按内容哈希记录：未修改的旧配置不会覆盖当前桌宠或工作副本；同时改动旧目录和活动库时，旧目录修改优先并清除活动库标记。
+无效 JSON 保留上一份有效配置，修正后自动重试。`autoStart` 与外部监听端口属于启动参数，需要重载扩展。
+
+「看着对话框」通过窗口进程名/产品信息定位 GitHub Copilot，不依赖会话标题。
+可见且未最小化的窗口中优先前台实例；浏览器/终端里带 Copilot 的标题不会被选中。
+Windows UI Automation 能读取输入框时朝输入框中心看；应用未暴露该控件时朝窗口下方输入区域看。
+没有可见窗口时保持默认朝向，窗口恢复后继续跟随；不需要 Copilot SDK 提供窗口定位接口。
 
 ### 完整示例
 
@@ -162,7 +179,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:38888/api/idle"    -Conten
 | `autoStart` | bool | `false` | 打开 Copilot 时自动召唤桌宠（多会话同时开也不会重复召唤） |
 | `sprite` | string | `"spritesheet.png"` | 贴图文件名，与 pet.json 同目录，支持 png/gif/webp |
 | `frameWidth` / `frameHeight` | number | 32 | 单帧像素尺寸 |
-| `scale` | number | 4 | 显示放大倍数（像素风小贴图建议 3~4；大贴图设 1） |
+| `scale` | number | 4 | 正数缩放倍数，支持小数（像素风小贴图建议 3~4；大贴图可设 1 或更小） |
 | `fps` | number | 8 | 全局帧率 |
 | `defaultAnimation` | string | `"idle"` | 待机时播放的动画名 |
 | `pollIntervalMs` | number | 250 | 桌宠窗口/面板拉取状态的间隔（毫秒，100~5000）。SSE 可用时基本走推送，这个值只作为兜底 |
@@ -281,7 +298,7 @@ tests/           零依赖测试（node --test）
 | `POST /api/look_at_copilot` | `{ "enabled": true/false }` 开关「看着对话框」；不传 `enabled` 则切换 |
 | `POST /api/open_folder` | 在资源管理器中打开桌宠库文件夹（`%APPDATA%\copilot-desktop-pet\pets`，路径固定不接受外部输入），返回 `{ ok, path }` |
 | `POST /api/pet/show` / `hide` / `toggle` | 召唤 / 收回 / 切换桌宠 |
-| `GET /api/pets`；`POST /api/pets/save` / `import` / `activate` | 桌宠库：列表 / 保存当前 / 导入（JSON+贴图 base64）/ 切换 |
+| `GET /api/pets`；`POST /api/pets/save` / `import` / `activate` / `delete` | 桌宠库：列表（含预览帧信息）/ 保存当前 / 导入（JSON+贴图 base64）/ 切换 / 删除 |
 | `POST /api/working` / `idle` / `activity` | 外部事件推送（需开启 `externalEvents`；`activity` 接受 `{ "activity": "working" \| "idle" }`） |
 
 ### 状态判定原理（依次命中即返回，`GET /api/state` 的 `activitySource` 会标明来源）

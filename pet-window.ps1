@@ -89,103 +89,18 @@ public static class PetChatBridge
 # 找 Copilot 对话框窗口 + 算桌宠该朝哪边看：纯 Win32 取窗口矩形，
 # 避免 WPF 的 DIP 与 Cursor.Position/GetWindowRect 的物理像素混算
 if (-not ("PetWin32" -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public static class PetWin32
-{
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
-
-    private delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
-
-    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
-    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
-    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
-    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder s, int max);
-    [DllImport("user32.dll")] private static extern int GetWindowTextLengthW(IntPtr hWnd);
-
-    // 可见、未最小化、标题含 "copilot" 的顶层窗口里挑面积最大的那个。
-    // 桌宠自己标题为空、聊天窗标题是「聊天」，都不会误命中。
-    public static IntPtr FindCopilotWindow()
-    {
-        IntPtr best = IntPtr.Zero;
-        long bestArea = 0;
-        EnumProc cb = delegate(IntPtr h, IntPtr p)
-        {
-            if (!IsWindowVisible(h) || IsIconic(h)) return true;
-            int len = GetWindowTextLengthW(h);
-            if (len <= 0 || len > 512) return true;
-            var sb = new StringBuilder(len + 1);
-            GetWindowTextW(h, sb, sb.Capacity);
-            if (sb.ToString().IndexOf("copilot", StringComparison.OrdinalIgnoreCase) < 0) return true;
-            RECT r;
-            if (!GetWindowRect(h, out r)) return true;
-            long area = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
-            if (area > bestArea) { bestArea = area; best = h; }
-            return true;
-        };
-        EnumWindows(cb, IntPtr.Zero);
-        GC.KeepAlive(cb);
-        return best;
-    }
-
-    // 从 self 窗口中心指向 Copilot 窗口矩形最近点的向量（物理像素）。
-    // 找不到 Copilot 窗口返回 null；桌宠正好在对话框范围内返回 {0,0}（保持默认朝向）。
-    public static int[] LookVector(IntPtr self)
-    {
-        IntPtr h = FindCopilotWindow();
-        if (h == IntPtr.Zero) return null;
-        RECT me, r;
-        if (!GetWindowRect(self, out me)) return null;
-        if (!GetWindowRect(h, out r)) return null;
-        if (r.Right <= r.Left || r.Bottom <= r.Top) return null;
-        double cx = (me.Left + me.Right) / 2.0;
-        double cy = (me.Top + me.Bottom) / 2.0;
-        double tx = Math.Min(Math.Max(cx, (double)r.Left), (double)r.Right);
-        double ty = Math.Min(Math.Max(cy, (double)r.Top), (double)r.Bottom);
-        return new int[] { (int)Math.Round(tx - cx), (int)Math.Round(ty - cy) };
-    }
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    Add-Type -Path (Join-Path $ExtDir "pet-win32.cs") -ReferencedAssemblies @('System.dll', [Windows.Int32Rect].Assembly.Location, [Windows.Automation.AutomationElement].Assembly.Location, [Windows.Automation.ControlType].Assembly.Location)
 }
-'@
-}
-
+. (Join-Path $ExtDir "pet-data.ps1")
+Initialize-PetData
 $script:configPath = Join-Path $DataDir "pet.json"
-$legacyConfigPath = Join-Path $ExtDir "pet.json"
-$legacyPetsPath = Join-Path $ExtDir "pets"
 $script:petsPath = Join-Path $DataDir "pets"
-if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
-if (-not (Test-Path $script:configPath) -and (Test-Path $legacyConfigPath)) {
-    Copy-Item $legacyConfigPath $script:configPath -ErrorAction SilentlyContinue
-}
-if (-not (Test-Path (Join-Path $DataDir ".legacy-data-migrated"))) {
-    Get-ChildItem $ExtDir -File | Where-Object { $_.Extension -in '.png', '.gif', '.webp' } | ForEach-Object {
-        $target = Join-Path $DataDir $_.Name
-        if (-not (Test-Path $target)) { Copy-Item $_.FullName $target }
-    }
-    if (Test-Path $legacyPetsPath) {
-        $targetPetsPath = Join-Path $DataDir "pets"
-        New-Item -ItemType Directory -Path $targetPetsPath -Force | Out-Null
-        Get-ChildItem $legacyPetsPath -Recurse -File | ForEach-Object {
-            $relative = $_.FullName.Substring($legacyPetsPath.Length).TrimStart('\\', '/')
-            $target = Join-Path $targetPetsPath $relative
-            if (-not (Test-Path $target)) {
-                $targetDir = Split-Path -Parent $target
-                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-                Copy-Item $_.FullName $target
-            }
-        }
-    }
-    Set-Content -Path (Join-Path $DataDir ".legacy-data-migrated") -Value "" -NoNewline
-}
 
 function Read-PetConfig {
     try {
         $raw = Get-Content -Raw -Encoding UTF8 $script:configPath
-        return ($raw | ConvertFrom-Json)
+        return (Convert-PetConfig ($raw | ConvertFrom-Json))
     } catch {
         return $null
     }
@@ -196,7 +111,7 @@ if ($null -eq $script:cfg) { exit 1 }
 
 $script:fw = [int]$script:cfg.frameWidth
 $script:fh = [int]$script:cfg.frameHeight
-$script:scale = if ($script:cfg.scale) { [int]$script:cfg.scale } else { 4 }
+$script:scale = if ($script:cfg.scale) { [double]$script:cfg.scale } else { 4 }
 $script:fps = if ($script:cfg.fps) { [double]$script:cfg.fps } else { 8 }
 $script:spriteW = $script:fw * $script:scale
 $script:spriteH = $script:fh * $script:scale
@@ -227,6 +142,7 @@ function Load-Bitmap([string]$file) {
     $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
     $bmp.BeginInit()
     $bmp.UriSource = New-Object System.Uri($file)
+    $bmp.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
     $bmp.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
     $bmp.EndInit()
     $bmp.Freeze()
@@ -249,7 +165,7 @@ $badgeL = $winW - 32
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Title="Copilot Desktop Pet" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False"
         Width="$winW" Height="$winH">
   <Canvas x:Name="Root">
@@ -454,7 +370,7 @@ function Update-LookTarget {
 function Update-Geometry {
     $script:fw = [int]$script:cfg.frameWidth
     $script:fh = [int]$script:cfg.frameHeight
-    $script:scale = if ($script:cfg.scale) { [int]$script:cfg.scale } else { 4 }
+    $script:scale = if ($script:cfg.scale) { [double]$script:cfg.scale } else { 4 }
     $script:fps = if ($script:cfg.fps) { [double]$script:cfg.fps } else { 8 }
     $script:spriteW = $script:fw * $script:scale
     $script:spriteH = $script:fh * $script:scale
@@ -610,23 +526,28 @@ $pollTimer.Add_Tick({
 
     if ($script:pollCount % 4 -eq 1) {
         try {
+            Sync-PetSources
             $wt = (Get-Item $script:configPath).LastWriteTime
             if ($wt -ne $script:configWriteTime) {
-                $script:configWriteTime = $wt
                 $newCfg = Read-PetConfig
                 if ($null -ne $newCfg) {
                     $geomChanged = ([int]$newCfg.frameWidth -ne $script:fw) -or ([int]$newCfg.frameHeight -ne $script:fh)
-                    $newScale = if ($newCfg.scale) { [int]$newCfg.scale } else { 4 }
+                    $newScale = if ($newCfg.scale) { [double]$newCfg.scale } else { 4 }
                     if ($newScale -ne $script:scale) { $geomChanged = $true }
                     $newFps = if ($newCfg.fps) { [double]$newCfg.fps } else { 8 }
                     if ($newFps -ne $script:fps) { $geomChanged = $true }
                     $newSprite = Join-Path $DataDir ([string]$newCfg.sprite)
                     if (-not (Test-Path $newSprite)) { $newSprite = Join-Path $ExtDir ([string]$newCfg.sprite) }
-                    if ($newSprite -ne $script:spritePath -and (Test-Path $newSprite)) {
+                    if (Test-Path $newSprite) {
                         $script:spritePath = $newSprite
                         $script:bitmap = Load-Bitmap $newSprite
                     }
+                    $oldLook = [bool]$script:cfg.behavior.lookAtCopilot
                     $script:cfg = $newCfg
+                    $script:configWriteTime = $wt
+                    if ($oldLook -ne [bool]$newCfg.behavior.lookAtCopilot) { $script:lookAtCopilot = [bool]$newCfg.behavior.lookAtCopilot; $script:lookTarget = $null }
+                    $script:frame = 0
+                    $bubbleText.FontSize = [double]$script:cfg.speech.fontSize
                     if ($geomChanged) { Update-Geometry }
                     try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
                     # 配置热重载：pollIntervalMs 变化时同步 DispatcherTimer 间隔
@@ -926,9 +847,8 @@ $menu = New-Object System.Windows.Controls.ContextMenu
 $itemSettings = New-Object System.Windows.Controls.MenuItem
 $itemSettings.Header = "打开设置"
 $itemSettings.Add_Click({
-    $url = Get-PanelUrl
-    if ($url -ne "") { Start-Process $url }
-    else { Show-Bubble "没有运行中的桌宠服务，先打开 Copilot 或运行 start-pet.bat" 4500 }
+    $settingsScript = Join-Path $ExtDir "pet-settings.ps1"
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList ('-NoProfile -STA -ExecutionPolicy Bypass -File "' + $settingsScript + '" -ExtDir "' + $ExtDir + '" -DataDir "' + $DataDir + '"')
 })
 $menu.Items.Add($itemSettings) | Out-Null
 

@@ -9,7 +9,7 @@
 
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFile, stat, readdir, writeFile, mkdir, unlink, copyFile, rename } from "node:fs/promises";
+import { readFile, stat, readdir, writeFile, mkdir, unlink, copyFile, rename, rm } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { unlinkSync } from "node:fs";
 import os from "node:os";
@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
+import { BUILTIN_ID, validPetId, installBuiltin, syncSources, snapshotSources } from "./config-store.mjs";
 import {
     DEFAULT_CONFIG,
     EXPLICIT_IDLE_SUPPRESS_MS,
@@ -71,6 +72,7 @@ const IMAGE_MIME = { ".png": "image/png", ".gif": "image/gif", ".webp": "image/w
 let sessionRef = null;
 
 let configCache = { mtimeMs: -1, config: DEFAULT_CONFIG, error: null };
+let configReadQueue = Promise.resolve();
 
 async function copyDirectoryWithoutOverwrite(source, destination) {
     let entries;
@@ -91,6 +93,7 @@ async function copyDirectoryWithoutOverwrite(source, destination) {
 
 async function ensureUserData() {
     await mkdir(PET_LIBRARY_DIR, { recursive: true });
+    await installBuiltin(USER_DATA_DIR, EXT_DIR);
     let configExists = true;
     try { await stat(CONFIG_FILE); } catch { configExists = false; }
     if (!configExists) {
@@ -98,9 +101,12 @@ async function ensureUserData() {
         catch (err) {
             if (err.code !== "EEXIST" && err.code !== "ENOENT") throw err;
             if (err.code === "ENOENT") {
-                await writeFile(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2), { flag: "wx" }).catch((e) => {
+                const builtin = JSON.parse(await readFile(path.join(PET_LIBRARY_DIR, BUILTIN_ID, "pet.json"), "utf8"));
+                builtin.sprite = path.join("pets", BUILTIN_ID, builtin.sprite);
+                await writeFile(CONFIG_FILE, JSON.stringify(builtin, null, 2), { flag: "wx" }).catch((e) => {
                     if (e.code !== "EEXIST") throw e;
                 });
+                await writeFile(ACTIVE_PET_FILE, JSON.stringify({ id: BUILTIN_ID }), "utf8");
             }
         }
     }
@@ -119,17 +125,29 @@ async function ensureUserData() {
 }
 
 async function readConfig(force) {
+    const next = configReadQueue.then(() => readConfigUnlocked(force));
+    configReadQueue = next.catch(() => {});
+    return next;
+}
+
+async function readConfigUnlocked(force) {
     try {
         await ensureUserData();
+        await syncSources(USER_DATA_DIR, EXT_DIR);
         const st = await stat(CONFIG_FILE);
-        if (force || st.mtimeMs !== configCache.mtimeMs) {
+        if (force || configCache.error || st.mtimeMs !== configCache.mtimeMs) {
             const raw = await readFile(CONFIG_FILE, "utf8");
             const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+            const oldLook = configCache.config.behavior.lookAtCopilot;
+            const firstRead = configCache.mtimeMs === -1;
             configCache = {
                 mtimeMs: st.mtimeMs,
                 config: mergeConfig(parsed),
                 error: null,
             };
+            if (firstRead || oldLook !== configCache.config.behavior.lookAtCopilot) {
+                petState.lookAtCopilot = !!configCache.config.behavior.lookAtCopilot;
+            }
         }
     } catch (err) {
         configCache = Object.assign({}, configCache, { error: String((err && err.message) || err) });
@@ -138,7 +156,7 @@ async function readConfig(force) {
 }
 
 function petLibraryPath(id) {
-    if (!/^[0-9a-f-]{36}$/i.test(String(id || ""))) return null;
+    if (!validPetId(id)) return null;
     return path.join(PET_LIBRARY_DIR, id);
 }
 
@@ -198,7 +216,10 @@ async function listPetLibrary() {
         if (!dir) continue;
         try {
             const cfg = JSON.parse((await readFile(path.join(dir, "pet.json"), "utf8")).replace(/^\uFEFF/, ""));
-            pets.push({ id, name: String(cfg.name || "未命名桌宠"), sprite: String(cfg.sprite || "") });
+            const anim = (cfg.animations || {})[cfg.defaultAnimation || "idle"] || { row: 0, frames: 1 };
+            pets.push({ id, name: String(cfg.name || "未命名桌宠"), sprite: String(cfg.sprite || ""),
+                frameWidth: Number(cfg.frameWidth) || 32, frameHeight: Number(cfg.frameHeight) || 32,
+                row: Number(anim.row) || 0, frames: Number(anim.frames) || 1 });
         } catch {}
     }
     return { pets, activeId };
@@ -289,9 +310,27 @@ async function activatePet(id) {
     await writeFile(tempConfig, JSON.stringify(cfg, null, 2), "utf8");
     await rename(tempConfig, CONFIG_FILE);
     await writeFile(ACTIVE_PET_FILE, JSON.stringify({ id }), "utf8");
+    await snapshotSources(USER_DATA_DIR, EXT_DIR);
     const { config, error } = await readConfig(true);
     if (error) return { ok: false, status: 500, error };
     return { ok: true, config };
+}
+
+async function deletePet(id) {
+    const dir = petLibraryPath(id);
+    if (!dir) return { ok: false, status: 400, error: "无效的桌宠编号" };
+    try { await stat(path.join(dir, "pet.json")); }
+    catch { return { ok: false, status: 404, error: "找不到该桌宠" }; }
+    const { pets, activeId } = await listPetLibrary();
+    const current = (await readConfig(false)).config;
+    if (activeId === id || String(current.sprite).replace(/\\/g, "/").startsWith("pets/" + id + "/")) {
+        const replacement = pets.find((pet) => pet.id !== id);
+        if (!replacement) return { ok: false, status: 409, error: "请先导入或保存另一只桌宠，再删除当前桌宠" };
+        const result = await activatePet(replacement.id);
+        if (!result.ok) return result;
+    }
+    await rm(dir, { recursive: true });
+    return { ok: true };
 }
 
 // ---- 桌宠共享状态（桌面窗与面板轮询/订阅获取） ----
@@ -713,6 +752,14 @@ async function startServer() {
                 const body = parseBody(await readBody(req));
                 if (body === null) { sendJson(res, { ok: false, error: "invalid json" }, 400); return; }
                 const result = await activatePet(body.id);
+                sendJson(res, result, result.ok ? 200 : result.status);
+                if (result.ok) broadcastState();
+                return;
+            }
+            if (p === "/api/pets/delete" && isPost) {
+                const body = parseBody(await readBody(req));
+                if (body === null) { sendJson(res, { ok: false, error: "invalid json" }, 400); return; }
+                const result = await deletePet(body.id);
                 sendJson(res, result, result.ok ? 200 : result.status);
                 if (result.ok) broadcastState();
                 return;
