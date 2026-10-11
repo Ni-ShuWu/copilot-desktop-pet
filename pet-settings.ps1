@@ -55,9 +55,12 @@ function Update-SettingsPreview {
         $image = New-Object Windows.Media.Imaging.BitmapImage
         $image.BeginInit(); $image.CacheOption = 'OnLoad'; $image.CreateOptions = 'IgnoreImageCache'
         $image.UriSource = New-Object Uri((Join-Path $pet.Directory ([string]$pet.Config.sprite))); $image.EndInit(); $image.Freeze()
-        $anim = $pet.Config.animations.([string]$pet.Config.defaultAnimation)
-        if (-not $anim) { $anim = $pet.Config.animations.idle }
+        $animationName = [string]$pet.Config.defaultAnimation
+        $anim = $pet.Config.animations.($animationName)
+        if (-not $anim) { $animationName = 'idle'; $anim = $pet.Config.animations.idle }
         $frames = [Math]::Max(1, [int]$anim.frames)
+        $fps = Get-PetAnimationFps $pet.Config $animationName
+        $script:settingsTimer.Interval = [TimeSpan]::FromMilliseconds([Math]::Max(30, 1000.0 / $fps))
         $rect = New-Object Windows.Int32Rect(($script:previewFrame % $frames) * [int]$pet.Config.frameWidth), ([int]$anim.row * [int]$pet.Config.frameHeight), ([int]$pet.Config.frameWidth), ([int]$pet.Config.frameHeight)
         $script:settingsPreview.Source = New-Object Windows.Media.Imaging.CroppedBitmap($image, $rect)
     } catch { $script:settingsPreview.Source = $null; Set-SettingsStatus ('预览失败：' + $_.Exception.Message) $true }

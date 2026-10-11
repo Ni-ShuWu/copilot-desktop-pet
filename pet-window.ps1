@@ -208,6 +208,7 @@ $badge = $window.FindName("Badge")
 $script:mode = "idle"          # idle | walk | sleep
 $script:dir = 1
 $script:frame = 0
+$script:activeFps = 0.0
 $script:hopY = 0.0
 $script:hopV = 0.0
 $script:overrideAnim = $null
@@ -423,6 +424,11 @@ function Update-SpriteFrame {
         $frames = [int]$anim.frames
         if ($frames -lt 1) { $frames = 1 }
     }
+    $fps = Get-PetAnimationFps $script:cfg $animName
+    if ($fps -ne $script:activeFps) {
+        $script:activeFps = $fps
+        $animTimer.Interval = [TimeSpan]::FromMilliseconds([Math]::Max(30, 1000.0 / $fps))
+    }
     $script:frame = ($script:frame + 1) % $frames
     $flip = $script:dir
     if ($script:lookAtCopilot -and $animName -eq "look" -and $null -ne $anim) {
@@ -558,6 +564,7 @@ $pollTimer.Add_Tick({
                     $script:configWriteTime = $wt
                     if ($oldLook -ne [bool]$newCfg.behavior.lookAtCopilot) { $script:lookAtCopilot = [bool]$newCfg.behavior.lookAtCopilot; $script:lookTarget = $null }
                     $script:frame = 0
+                    $script:activeFps = 0.0
                     $bubbleText.FontSize = [double]$script:cfg.speech.fontSize
                     if ($geomChanged) { Update-Geometry }
                     try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}

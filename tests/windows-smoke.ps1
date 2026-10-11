@@ -5,6 +5,12 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, UIA
 . (Join-Path $RepoDir 'pet-data.ps1')
 function Assert-True($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 Initialize-PetData
+$fpsConfig = [pscustomobject]@{ fps = 8; animations = [pscustomobject]@{ idle = [pscustomobject]@{ fps = 5 }; walk = [pscustomobject]@{ fps = 12 }; sleep = [pscustomobject]@{ fps = 2 }; thinking = [pscustomobject]@{} } }
+Assert-True ((Get-PetAnimationFps $fpsConfig 'idle') -eq 5) 'Animation FPS must override the global FPS'
+Assert-True ((Get-PetAnimationFps $fpsConfig 'walk') -eq 12) 'Each animation must support its own FPS'
+Assert-True ((Get-PetAnimationFps $fpsConfig 'sleep') -eq 2) 'Slow animation FPS must be preserved'
+Assert-True ((Get-PetAnimationFps $fpsConfig 'thinking') -eq 8) 'Animations without FPS must inherit the global FPS'
+Assert-True ((Get-PetAnimationFps $fpsConfig 'missing') -eq 8) 'Missing animations must fall back to the global FPS'
 $pets = @(Get-PetLibrary)
 Assert-True ($pets.Count -eq 1) 'Standalone first launch must install Octocat'
 Assert-True ((Read-PetJson (Join-Path $DataDir 'pet.json')).scale -eq 0.15) 'Fractional scale must survive'
