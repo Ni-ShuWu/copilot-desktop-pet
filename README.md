@@ -70,8 +70,9 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
   "fps": 8,
   "defaultAnimation": "idle",
   "animations": {
-    "idle": { "row": 0, "frames": 4 },
-    "walk": { "row": 1, "frames": 4 },
+    "idle": { "row": 0, "frames": 4, "fps": 5 },
+    "walk": { "row": 1, "frames": 4, "fps": 12 },
+    "sleep": { "row": 2, "frames": 4, "fps": 2 },
     "thinking": { "row": 3, "frames": 4 },
     "work": { "row": 4, "frames": 4 },
     "review": { "row": 9, "frames": 4 }
@@ -109,10 +110,10 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
 | `autoStart` | 打开 Copilot 时自动召唤；默认 `false`。 |
 | `sprite` | 与 `pet.json` 同目录的贴图文件名。 |
 | `frameWidth` / `frameHeight` | 单帧宽高（像素）。 |
-| `scale` / `fps` | 显示缩放和默认帧率。 |
+| `scale` / `fps` | 显示缩放和默认帧率；动画未设置自己的 `fps` 时使用全局帧率。 |
 | `defaultAnimation` | 待机动画名称。 |
 | `pollIntervalMs` | 状态轮询间隔（毫秒，默认 250）；SSE 可用时主要作为兜底。 |
-| `animations` | 动画名到贴图行号、帧数的映射；动画可单独设置 `fps`、`leftRow`。 |
+| `animations` | 动画名到贴图行号、帧数的映射；每个动画可单独设置 `fps`、`leftRow`，`fps` 未设置时沿用全局值。 |
 | `behavior.autoWander` | 是否自动走动。 |
 | `behavior.walkSpeedPxPerSec` | 每秒移动像素数。 |
 | `behavior.wanderIntervalSec` | 自动行为切换的最短、最长间隔（秒）。 |
@@ -124,7 +125,7 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
 | `chat.offlineReplies` | 无法取得回复时显示的随机台词。 |
 | `externalEvents` | 可选的本机外部工作状态推送设置，见下文。 |
 
-常用动画名：`idle`、`walk`、`sleep`、`thinking`、`work`、`chat`、`look`、`drag`、`poke`、`review`、`aborted`、`error`。可自定义名称；名称与行为别名匹配时会自动用于对应场景。动画优先级大致为手动指定、拖动、点击、思考、工具工作、聊天、注视、睡眠、走动、待机。
+动画项中的 `fps` 是该动画每秒播放的帧数；例如可设为 `"idle": { "row": 0, "frames": 4, "fps": 5 }`、`"walk": { "row": 1, "frames": 4, "fps": 12 }`、`"sleep": { "row": 2, "frames": 4, "fps": 2 }`。这些数值仅作示例，可在运行时观察后自行调整；省略时沿用全局 `fps`。常用动画名：`idle`、`walk`、`sleep`、`thinking`、`work`、`chat`、`look`、`drag`、`poke`、`review`、`aborted`、`error`。可自定义名称；名称与行为别名匹配时会自动用于对应场景。动画优先级大致为手动指定、拖动、点击、思考、工具工作、聊天、注视、睡眠、走动、待机。
 
 「看着对话框」通过 Windows 窗口识别定位 Copilot，不依赖会话标题。若窗口不可见或最小化，桌宠保持默认朝向；窗口重新出现后会继续跟随。输入框可被 UI Automation 识别时会朝输入框看，否则朝窗口下方看。
 

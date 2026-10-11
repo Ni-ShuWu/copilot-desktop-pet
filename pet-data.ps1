@@ -15,6 +15,24 @@ function Get-PetHash([string]$Path) {
     try { return ([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($raw)))).Replace('-', '').ToLowerInvariant() }
     finally { $hasher.Dispose() }
 }
+function Get-PetAnimationFps($Config, [string]$AnimationName) {
+    $animation = $null
+    if ($Config.animations) {
+        $property = $Config.animations.PSObject.Properties[$AnimationName]
+        if ($property) { $animation = $property.Value }
+    }
+    if ($null -ne $animation) {
+        try {
+            $fps = [double]$animation.fps
+            if ($fps -gt 0 -and -not [double]::IsNaN($fps) -and -not [double]::IsInfinity($fps)) { return $fps }
+        } catch {}
+    }
+    try {
+        $fps = [double]$Config.fps
+        if ($fps -gt 0 -and -not [double]::IsNaN($fps) -and -not [double]::IsInfinity($fps)) { return $fps }
+    } catch {}
+    return 8
+}
 function Get-PetDirectory([string]$Id) {
     if ($Id -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { throw '无效的桌宠编号' }
     return (Join-Path (Join-Path $DataDir 'pets') $Id)
