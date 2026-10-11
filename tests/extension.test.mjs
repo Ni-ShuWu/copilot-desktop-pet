@@ -706,7 +706,7 @@ test("19. 特殊动画别名：崩溃演配置里的 error 动画（thinking/cha
     }, { timeoutMs: 6000, intervalMs: 50, label: "crashed=true (failed 别名)" });
     assert.equal(crashed2.animation, "failed");
 });
-test("20. POST /api/open_folder：打开桌宠库文件夹（固定路径，不接受外部输入）", async (t) => {
+test("20. POST /api/open_folder：打开桌宠库文件夹（固定路径，不接受外部输入）", { skip: process.platform !== "win32" }, async (t) => {
     const ext = await boot(t, {});
     const r = await ext.request("POST", "/api/open_folder", { body: {} });
     assert.equal(r.status, 200);
