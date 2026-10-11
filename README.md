@@ -9,7 +9,7 @@
 - 透明置顶桌面窗：走动、睡觉、思考、工作、复盘、错误等动画；可拖动、点击互动。
 - Copilot 会话联动：区分模型思考与工具执行，也能感知其他会话；完成、中止和报错有不同的收场动画。
 - 桌宠聊天、手动切换动画、让桌宠说话，以及实时看向 Copilot 对话框。
-- 桌宠库：保存、导入、预览、切换和删除自定义桌宠。
+- 桌宠库：保存、导入、预览、切换和删除自定义桌宠；支持“全员上班”同时召唤库内所有桌宠。
 - 本机 HTTP API、SSE 状态流和可选外部事件接口，方便其他本地程序联动。
 - 支持自定义 spritesheet 与 `pet.json`，修改配置后自动热更新。
 
@@ -149,6 +149,8 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
 | `POST /api/pets/import` | 导入配置和贴图并切换。 |
 | `POST /api/pets/activate` | 按 `{"id":"UUID"}` 切换桌宠。 |
 | `POST /api/pets/delete` | 按 `{"id":"UUID"}` 删除；最后一只当前桌宠不能删除。 |
+| `GET /api/pets/all` | 查询“全员上班”是否启用及召唤数量。 |
+| `POST /api/pets/all/toggle` | 切换“全员上班”；启动期间暂时收起普通桌宠，关闭后恢复。 |
 | `POST /api/working`、`/api/idle`、`/api/activity` | 可选的外部活动状态推送，需启用 `externalEvents`。 |
 
 聊天接口可能返回 400（输入无效）、429（已有聊天进行中）、503（没有可用会话）或 504（超时/错误）。
