@@ -35,6 +35,8 @@ Assert-True (-not [PetWin32]::IsCopilotCandidate('chrome', '', 'GitHub Copilot')
 Assert-True ([PetWin32]::IsCopilotCandidate('electron', 'GitHub Copilot', 'renamed')) 'Product identity lookup failed'
 $vector = [PetWin32]::VectorToCompose(400,200,500,300,100,100,900,900)
 Assert-True ($vector[0] -ne 0 -or $vector[1] -ne 0) 'Overlapping app must still have a look vector'
+$source = Get-Content (Join-Path $RepoDir 'pet-win32.cs') -Raw
+Assert-True ($source.Contains('DateTime nextWindowScan') -and $source.Contains('now.AddMilliseconds(1000)')) 'Copilot window enumeration must be cached between scans'
 
 # A real Win32 window with a session title and an accessible input control.
 $exe = Join-Path $TestDir 'copilot.exe'

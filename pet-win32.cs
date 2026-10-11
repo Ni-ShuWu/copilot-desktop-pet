@@ -22,6 +22,8 @@ public static class PetWin32
     private static IntPtr queryWindow = IntPtr.Zero;
     private static double[] inputPoint;
     private static DateTime nextQuery = DateTime.MinValue;
+    private static IntPtr cachedTarget = IntPtr.Zero;
+    private static DateTime nextWindowScan = DateTime.MinValue;
     private static bool PhysicalRect(IntPtr h, out RECT r)
     {
         // DWM bounds are physical pixels even when this process is DPI unaware;
@@ -86,7 +88,43 @@ public static class PetWin32
     // overlaps the app. Clamping to the nearest edge used to yield {0,0} there.
     public static int[] LookVector(IntPtr self)
     {
-        IntPtr target = FindCopilotWindow();
+        IntPtr foreground = GetForegroundWindow();
+        DateTime now = DateTime.UtcNow;
+        IntPtr target = cachedTarget;
+        if (foreground != IntPtr.Zero && foreground != self && IsWindowVisible(foreground) && !IsIconic(foreground))
+        {
+            uint owner;
+            GetWindowThreadProcessId(foreground, out owner);
+            try
+            {
+                using (Process proc = Process.GetProcessById((int)owner))
+                {
+                    var title = new StringBuilder(1024);
+                    GetWindowTextW(foreground, title, title.Capacity);
+                    string product = "";
+                    if (!IsCopilotCandidate(proc.ProcessName, "", title.ToString()))
+                    {
+                        try { product = proc.MainModule.FileVersionInfo.ProductName; } catch { }
+                    }
+                    if (IsCopilotCandidate(proc.ProcessName, product, title.ToString())) target = foreground;
+                }
+            }
+            catch { }
+        }
+        if (target == IntPtr.Zero || now >= nextWindowScan)
+        {
+            target = FindCopilotWindow();
+            cachedTarget = target;
+            nextWindowScan = now.AddMilliseconds(1000);
+        }
+        if (target != cachedTarget)
+        {
+            cachedTarget = target;
+            inputPoint = null;
+            queryWindow = IntPtr.Zero;
+            inputQuery = null;
+            nextQuery = DateTime.MinValue;
+        }
         if (target == IntPtr.Zero) return null;
         RECT me, app;
         if (!PhysicalRect(self, out me) || !PhysicalRect(target, out app)) return null;
@@ -97,7 +135,7 @@ public static class PetWin32
             inputPoint = inputQuery.Status == TaskStatus.RanToCompletion ? inputQuery.Result : null;
             inputQuery = null;
         }
-        if (inputQuery == null && DateTime.UtcNow >= nextQuery)
+        if (inputQuery == null && now >= nextQuery)
         {
             if (queryWindow != target) inputPoint = null;
             queryWindow = target;
