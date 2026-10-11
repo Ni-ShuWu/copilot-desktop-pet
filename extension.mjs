@@ -340,6 +340,11 @@ const petState = createPetState(Date.now());
 let animToken = null;
 let crashTimes = [];
 let petProc = null;
+let allPetProcs = [];
+let allPetsActive = false;
+let allPetsTransition = false;
+let allPetsRestorePet = null;
+let testPetWasRunning = false;
 let serverEntry = null;
 let bootCfg = DEFAULT_CONFIG;
 
@@ -438,7 +443,7 @@ async function buildState() {
         activitySource: active.source,
         workPhase: petState.workPhase,
         lookAtCopilot: !!petState.lookAtCopilot,
-        running: isPetRunning() || !!foreignPet,
+        running: !allPetsActive && (isPetRunning() || testPetWasRunning || !!foreignPet),
         sessions: entries.length,
         crashed: petState.crashed,
         pollIntervalMs: clampPollMs(config.pollIntervalMs, DEFAULT_CONFIG.pollIntervalMs),
@@ -512,7 +517,34 @@ async function authorizeExternal(req, url, body) {
     return { ok: true };
 }
 
+async function callPetEndpoint(entry, endpoint) {
+    const url = new URL(endpoint, entry.url);
+    const response = await fetch(url, { method: "POST", signal: AbortSignal.timeout(2000) });
+    return response.ok;
+}
+
+async function restorePreviousPets() {
+    const previous = allPetsRestorePet || [];
+    allPetsRestorePet = null;
+    for (const entry of previous) {
+        if (entry.local) await startDesktopPet();
+        else {
+            try {
+                if (!(await callPetEndpoint(entry, "/api/pet/show"))) {
+                    const foreign = (await readRegistry()).find((current) => current.pid === entry.pid && pidAlive(current.pid));
+                    if (foreign) await callPetEndpoint(foreign, "/api/pet/show");
+                }
+            } catch {}
+        }
+    }
+}
+
 async function startDesktopPet() {
+    if (allPetsActive) return { ok: true, already: true, allPets: true };
+    if (process.env.PET_TEST_NO_SHELL === "1") {
+        testPetWasRunning = true;
+        return { ok: true, test: true };
+    }
     if (isPetRunning()) return { ok: true, already: true, pid: petProc.pid };
     if (!serverEntry) return { ok: false, error: "local server not started" };
     const foreign = (await readRegistry()).find((e) => e.pid !== process.pid && pidAlive(e.petPid));
@@ -529,6 +561,12 @@ async function startDesktopPet() {
 }
 
 async function stopDesktopPet() {
+    if (allPetsActive) return { ok: true, allPets: true };
+    if (process.env.PET_TEST_NO_SHELL === "1") {
+        const wasRunning = testPetWasRunning;
+        testPetWasRunning = false;
+        return { ok: true, test: true, wasRunning };
+    }
     if (isPetRunning()) {
         try { process.kill(petProc.pid); } catch {}
         petProc = null;
@@ -541,6 +579,92 @@ async function stopDesktopPet() {
         return { ok: true, foreign: true };
     }
     return { ok: true, already: true };
+}
+
+function startLibraryPet(pet, index, count) {
+    const child = spawn("powershell.exe", [
+        "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+        "-File", PS1_FILE,
+        "-ExtDir", EXT_DIR,
+        "-StateUrl", serverEntry.url,
+        "-DataDir", USER_DATA_DIR,
+        "-LibraryPetId", pet.id,
+        "-AllPetIndex", String(index),
+        "-AllPetCount", String(count),
+    ], { stdio: "ignore", windowsHide: true });
+    child.on("error", () => {});
+    return child;
+}
+
+async function toggleAllLibraryPets() {
+    if (allPetsTransition) return { ok: false, error: "全员模式正在切换，请稍后重试" };
+    allPetsTransition = true;
+    try {
+        if (allPetsActive) {
+            for (const child of allPetProcs) {
+                if (child && child.pid) { try { process.kill(child.pid); } catch {} }
+            }
+            allPetProcs = [];
+            allPetsActive = false;
+            await restorePreviousPets();
+            return { ok: true, active: false };
+        }
+        if (!serverEntry) return { ok: false, error: "local server not started" };
+        if (process.platform !== "win32" && process.env.PET_TEST_NO_SHELL !== "1") {
+            return { ok: false, error: "仅支持 Windows" };
+        }
+        const { pets } = await listPetLibrary();
+        if (!pets.length) return { ok: false, error: "桌宠库为空" };
+        const registry = await readRegistry();
+        const runningPetEntries = registry.filter((entry) => pidAlive(entry.petPid));
+        const localPetWasRunning = isPetRunning() || testPetWasRunning;
+        allPetsRestorePet = runningPetEntries
+            .filter((entry) => entry.pid !== process.pid)
+            .map((entry) => ({ ...entry, local: false }));
+        if (localPetWasRunning) allPetsRestorePet.push({ local: true });
+        if (localPetWasRunning) await stopDesktopPet();
+        const hiddenEntries = [];
+        for (const entry of allPetsRestorePet) {
+            if (entry.local) continue;
+            let hidden = false;
+            try { hidden = await callPetEndpoint(entry, "/api/pet/hide"); } catch {}
+            if (!hidden) {
+                for (const hiddenEntry of hiddenEntries) {
+                    try { await callPetEndpoint(hiddenEntry, "/api/pet/show"); } catch {}
+                }
+                allPetsRestorePet = null;
+                return { ok: false, error: "无法收起其他会话中的桌宠" };
+            }
+            hiddenEntries.push(entry);
+        }
+        allPetsActive = true;
+        try {
+            for (const [index, pet] of pets.entries()) {
+                if (process.env.PET_TEST_NO_SHELL === "1") {
+                    allPetProcs.push({ pid: null });
+                    continue;
+                }
+                const child = startLibraryPet(pet, index, pets.length);
+                allPetProcs.push(child);
+                child.once("error", () => {
+                    if (!allPetsActive) return;
+                    allPetsActive = false;
+                    for (const running of allPetProcs) if (running && running.pid) { try { process.kill(running.pid); } catch {} }
+                    allPetProcs = [];
+                    restorePreviousPets().catch(() => {});
+                });
+            }
+        } catch (error) {
+            allPetsActive = false;
+            for (const child of allPetProcs) if (child && child.pid) { try { process.kill(child.pid); } catch {} }
+            allPetProcs = [];
+            await restorePreviousPets();
+            return { ok: false, error: String(error && error.message || error) };
+        }
+        return { ok: true, active: true, count: pets.length };
+    } finally {
+        allPetsTransition = false;
+    }
 }
 
 // 让桌宠说话：写状态 + 立刻推给订阅者（SSE 客户端毫秒级收到）
@@ -770,6 +894,17 @@ async function startServer() {
                         : (isPetRunning() ? await stopDesktopPet() : await startDesktopPet());
                 sendJson(res, r);
                 broadcastState();
+                return;
+            }
+            if (p === "/api/pets/all/toggle" && isPost) {
+                const r = await toggleAllLibraryPets();
+                const status = r.ok ? 200 : r.error === "桌宠库为空" ? 409 : r.error.includes("切换") ? 409 : 500;
+                sendJson(res, r, status);
+                broadcastState();
+                return;
+            }
+            if (p === "/api/pets/all" && req.method === "GET") {
+                sendJson(res, { ok: true, active: allPetsActive, count: allPetProcs.length });
                 return;
             }
             if (p === "/api/say" && isPost) {
@@ -1117,6 +1252,7 @@ if (bootCfg.autoStart) {
 
 function shutdown() {
     try { if (isPetRunning()) process.kill(petProc.pid); } catch {}
+    try { for (const child of allPetProcs) if (child && child.pid) process.kill(child.pid); } catch {}
     try { serverEntry.server.close(); } catch {}
     try { unlinkSync(REG_FILE); } catch {}
 }

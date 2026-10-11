@@ -121,6 +121,7 @@
   <div class="library-head"><strong>桌宠库</strong><span><button id="btnOpenFolder">打开文件夹</button><button id="btnCloseLibrary" aria-label="关闭桌宠库">关闭</button></span></div>
   <div id="petList" aria-live="polite"></div>
   <div class="library-actions">
+    <button id="btnAllPets">全员上班 / 下班</button>
     <button id="btnSavePet">保存当前桌宠</button>
     <label class="file-button">选择配置<input id="configFile" type="file" accept=".json,application/json"></label>
     <label class="file-button">选择贴图<input id="spriteFile" type="file" accept=".png,.gif,.webp,image/png,image/gif,image/webp"></label>
@@ -496,6 +497,15 @@
 
   btnLibrary.addEventListener("click", function () { setLibraryOpen(library.hidden); });
   document.getElementById("btnCloseLibrary").addEventListener("click", function () { setLibraryOpen(false); });
+  document.getElementById("btnAllPets").addEventListener("click", function () {
+    var button = document.getElementById("btnAllPets");
+    button.disabled = true;
+    fetch("/api/pets/all/toggle", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "操作失败"); return d; }); })
+      .then(function (d) { setLibraryHint(d.active ? "全员上班：已召唤 " + d.count + " 只桌宠。" : "全员下班，普通桌宠已恢复。", false); })
+      .catch(function (e) { setLibraryHint(e.message, true); })
+      .then(function () { button.disabled = false; });
+  });
   document.getElementById("btnOpenFolder").addEventListener("click", function () {
     fetch("/api/open_folder", { method: "POST" })
       .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "打开失败"); return d; }); })

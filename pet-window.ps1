@@ -5,7 +5,10 @@
 param(
     [string]$ExtDir = $PSScriptRoot,
     [string]$StateUrl = "",
-    [string]$DataDir = ""
+    [string]$DataDir = "",
+    [string]$LibraryPetId = "",
+    [int]$AllPetIndex = -1,
+    [int]$AllPetCount = 0
 )
 
 if (-not $DataDir) {
@@ -93,8 +96,10 @@ if (-not ("PetWin32" -as [type])) {
     Add-Type -Path (Join-Path $ExtDir "pet-win32.cs") -ReferencedAssemblies @('System.dll', [Windows.Int32Rect].Assembly.Location, [Windows.Automation.AutomationElement].Assembly.Location, [Windows.Automation.ControlType].Assembly.Location)
 }
 . (Join-Path $ExtDir "pet-data.ps1")
-Initialize-PetData
-$script:configPath = Join-Path $DataDir "pet.json"
+if (-not $LibraryPetId) { Initialize-PetData }
+$script:libraryPetDir = if ($LibraryPetId) { Get-PetDirectory $LibraryPetId } else { "" }
+$script:configPath = if ($script:libraryPetDir) { Join-Path $script:libraryPetDir "pet.json" } else { Join-Path $DataDir "pet.json" }
+if ($script:libraryPetDir -and -not (Test-Path -LiteralPath $script:configPath)) { exit 1 }
 $script:petsPath = Join-Path $DataDir "pets"
 
 function Read-PetConfig {
@@ -149,8 +154,8 @@ function Load-Bitmap([string]$file) {
     return $bmp
 }
 
-$script:spritePath = Join-Path $DataDir ([string]$script:cfg.sprite)
-if (-not (Test-Path $script:spritePath)) { $script:spritePath = Join-Path $ExtDir ([string]$script:cfg.sprite) }
+$script:spritePath = if ($script:libraryPetDir) { Join-Path $script:libraryPetDir ([string]$script:cfg.sprite) } else { Join-Path $DataDir ([string]$script:cfg.sprite) }
+if (-not (Test-Path $script:spritePath) -and -not $script:libraryPetDir) { $script:spritePath = Join-Path $ExtDir ([string]$script:cfg.sprite) }
 if (-not (Test-Path $script:spritePath)) { exit 1 }
 $script:bitmap = Load-Bitmap $script:spritePath
 
@@ -282,7 +287,13 @@ function Update-StandaloneActivity {
 }
 
 $wa = [System.Windows.SystemParameters]::WorkArea
-$window.Left = $wa.Right - $window.Width - 60
+if ($AllPetIndex -ge 0 -and $AllPetCount -gt 0) {
+    $spacing = if ($AllPetCount -le 1) { 0 } else { [Math]::Min($window.Width, [Math]::Max(0, ($wa.Width - $window.Width) / ($AllPetCount - 1))) }
+    $groupWidth = $spacing * ($AllPetCount - 1) + $window.Width
+    $window.Left = $wa.Left + [Math]::Max(0, ($wa.Width - $groupWidth) / 2) + $AllPetIndex * $spacing
+} else {
+    $window.Left = $wa.Right - $window.Width - 60
+}
 $window.Top = $wa.Bottom - $window.Height - 12
 
 function Get-AnimDef([string]$name) {
@@ -526,7 +537,7 @@ $pollTimer.Add_Tick({
 
     if ($script:pollCount % 4 -eq 1) {
         try {
-            Sync-PetSources
+            if (-not $LibraryPetId) { Sync-PetSources }
             $wt = (Get-Item $script:configPath).LastWriteTime
             if ($wt -ne $script:configWriteTime) {
                 $newCfg = Read-PetConfig
@@ -536,8 +547,8 @@ $pollTimer.Add_Tick({
                     if ($newScale -ne $script:scale) { $geomChanged = $true }
                     $newFps = if ($newCfg.fps) { [double]$newCfg.fps } else { 8 }
                     if ($newFps -ne $script:fps) { $geomChanged = $true }
-                    $newSprite = Join-Path $DataDir ([string]$newCfg.sprite)
-                    if (-not (Test-Path $newSprite)) { $newSprite = Join-Path $ExtDir ([string]$newCfg.sprite) }
+                    $newSprite = if ($script:libraryPetDir) { Join-Path $script:libraryPetDir ([string]$newCfg.sprite) } else { Join-Path $DataDir ([string]$newCfg.sprite) }
+                    if (-not (Test-Path $newSprite) -and -not $script:libraryPetDir) { $newSprite = Join-Path $ExtDir ([string]$newCfg.sprite) }
                     if (Test-Path $newSprite) {
                         $script:spritePath = $newSprite
                         $script:bitmap = Load-Bitmap $newSprite
@@ -851,6 +862,20 @@ $itemSettings.Add_Click({
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList ('-NoProfile -STA -ExecutionPolicy Bypass -File "' + $settingsScript + '" -ExtDir "' + $ExtDir + '" -DataDir "' + $DataDir + '"')
 })
 $menu.Items.Add($itemSettings) | Out-Null
+
+$itemAllPets = New-Object System.Windows.Controls.MenuItem
+$itemAllPets.Header = "全员上班 开/关"
+$itemAllPets.Add_Click({
+    $url = Get-PanelUrl
+    if ($url -ne "") {
+        try {
+            $r = Invoke-RestMethod -Uri ($url + "api/pets/all/toggle") -Method Post -ContentType "application/json" -Body "{}" -TimeoutSec 10
+            if ($r.active) { Show-Bubble ("全员上班：" + $r.count + " 只桌宠") 2200 }
+            else { Show-Bubble "全员下班，恢复普通桌宠" 2200 }
+        } catch { Show-Bubble ("操作失败：" + $_.Exception.Message) 3500 }
+    } else { Show-Bubble "桌宠服务未连接" 2200 }
+})
+$menu.Items.Add($itemAllPets) | Out-Null
 
 $itemFolder = New-Object System.Windows.Controls.MenuItem
 $itemFolder.Header = "打开桌宠库文件夹"

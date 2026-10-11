@@ -4,6 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { makeSandbox, startExtension, freePort, openSSE, waitFor, sleep, sdkEventFile, emitSessionEvent, readChatLog } from "./helpers.mjs";
@@ -61,6 +63,29 @@ test("issue #8: 活动桌宠库 JSON 热改生效，直接修改工作副本不�
     assert.equal((await ext.request("GET", "/pet.json")).json.name, "工作副本改名");
     assert.equal((await ext.request("GET", "/pet.json")).json.name, "工作副本改名");
     assert.equal((await ext.request("GET", "/api/pets")).json.activeId, result.json.pet.id);
+});
+
+test("全员上班开关召唤所有桌宠且可重复切换", async (t) => {
+    const ext = await boot(t, {});
+    const sprite = await readFile(path.join(ext.dir, "assets", "octocat.png"));
+    const imported = await ext.request("POST", "/api/pets/import", { body: {
+        config: { ...BASE_PET, name: "第二只桌宠" },
+        spriteName: "second.png", spriteData: sprite.toString("base64"),
+    } });
+    assert.equal(imported.status, 200, imported.text);
+    assert.deepEqual((await ext.request("GET", "/api/pets/all")).json, { ok: true, active: false, count: 0 });
+    await ext.request("POST", "/api/pet/show");
+    const started = await ext.request("POST", "/api/pets/all/toggle", { body: {} });
+    assert.equal(started.status, 200, started.text);
+    assert.deepEqual(started.json, { ok: true, active: true, count: 2 });
+    assert.deepEqual((await ext.request("GET", "/api/pets/all")).json, { ok: true, active: true, count: 2 });
+    assert.equal((await ext.request("GET", "/api/state")).json.running, false);
+
+    const stopped = await ext.request("POST", "/api/pets/all/toggle", { body: {} });
+    assert.equal(stopped.status, 200, stopped.text);
+    assert.deepEqual(stopped.json, { ok: true, active: false });
+    assert.deepEqual((await ext.request("GET", "/api/pets/all")).json, { ok: true, active: false, count: 0 });
+    assert.equal((await ext.request("GET", "/api/state")).json.running, true);
 });
 
 test("issue #9: 内置默认桌宠、预览元数据、删除活动桌宠切换和最后一只保护", async (t) => {
