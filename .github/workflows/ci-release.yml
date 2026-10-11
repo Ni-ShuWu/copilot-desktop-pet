@@ -1,0 +1,99 @@
+name: CI and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example, v1.0.0)
+        required: true
+        default: v1.0.0
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Validate extension and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Validate Copilot extension source
+        run: |
+          node --check extension.mjs
+          node --check state.mjs
+          node --check config-store.mjs
+          node -e "const p=require('./package.json'); if (!p.name || !p.version || p.type !== 'module' || !p.scripts?.test) process.exit(1)"
+          test -f extension.mjs
+          test -f pet.html
+          test -f pet-window.ps1
+          test -f assets/octocat.json
+          test -f assets/octocat.png
+      - run: npm test
+
+  package:
+    name: Package Windows ${{ matrix.arch }} source archive
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble and validate source archive
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/copilot-desktop-pet-windows-${ARCH}"
+          cp -R assets config-store.mjs extension.mjs LICENSE package.json pet-data.ps1 pet-settings.ps1 pet-win32.cs pet-window.ps1 pet.example.json pet.html start-pet.bat start-pet.ps1 state.mjs README.md \
+            "dist/copilot-desktop-pet-windows-${ARCH}/"
+          test -f "dist/copilot-desktop-pet-windows-${ARCH}/extension.mjs"
+          test -f "dist/copilot-desktop-pet-windows-${ARCH}/assets/octocat.png"
+          (cd dist && zip -qr "copilot-desktop-pet-${ARCH}.zip" "copilot-desktop-pet-windows-${ARCH}")
+          bytes=$(stat -c '%s' "dist/copilot-desktop-pet-${ARCH}.zip")
+          echo "Archive size: ${bytes} bytes"
+          if [ "$bytes" -gt 8388608 ]; then
+            echo "Archive exceeds the 8 MiB release limit" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copilot-desktop-pet-${{ matrix.arch }}
+          path: dist/copilot-desktop-pet-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish v1.0.0 release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download architecture archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: copilot-desktop-pet-*
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$REF_NAME"
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then version="$INPUT_VERSION"; fi
+          gh release create "$version" dist/copilot-desktop-pet-amd64.zip dist/copilot-desktop-pet-arm64.zip \
+            --repo "$GITHUB_REPOSITORY" --title "$version" \
+            --notes "Windows source archives for amd64 and arm64. Requires Windows PowerShell and Copilot App; these are architecture-labelled source bundles, not standalone native executables."

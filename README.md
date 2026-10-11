@@ -185,6 +185,12 @@ Invoke-RestMethod -Method Post -Uri "$base/api/idle" -ContentType "application/j
 
 正常完成、中止和错误分别触发 `review`、`aborted` 和 `error` 动画；如果配置没有对应动画，会按可用动画回退。
 
+## GitHub Actions 与发行版
+
+GitHub Actions 会在推送到 `main`、Pull Request 和手动触发时检查扩展入口文件及必要素材，并运行测试。推送 `v*.*.*` 标签（例如 `v1.0.0`）或手动触发工作流会生成 amd64、arm64 两个架构标记的 Windows 源码 ZIP，并创建 GitHub Release。每个压缩包都检查完整源码/素材是否已组合，并限制在 8 MiB 以内。
+
+注意：两个 ZIP 包含相同的源码，不是按 CPU 架构编译的独立原生程序；运行仍需 Windows PowerShell 和 Copilot App。发布 v1.0.0 时推送 `v1.0.0` 标签，或在 Actions 手动运行并填写版本号。
+
 ## 开发与测试
 
 需要 Node.js 18+。运行测试：
