@@ -15,7 +15,7 @@
 
 ## 安装与启动
 
-1. 将仓库完整复制到项目的 `.github/extensions/desktop-pet/` 目录。保留 `assets/` 和脚本文件。
+1. 将仓库或[从发行版下载](https://github.com/Ni-ShuWu/copilot-desktop-pet/releases)完整复制到项目的 `.github/extensions/desktop-pet/` 目录。保留 `assets/` 和脚本文件。
 2. 在 Copilot App 中重载扩展，然后打开「桌宠」画布并选择「召唤桌宠」。
 3. 也可双击 `start-pet.bat` 启动。脚本会优先复用已运行的桌宠或已加载扩展的会话；否则以独立模式启动。
 
@@ -29,7 +29,7 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
 
 桌宠配置和用户桌宠库位于 `%APPDATA%\copilot-desktop-pet\`。扩展目录中的初始配置会在首次启动时复制到用户数据目录；导入的贴图存放在用户目录，不占扩展安装空间。
 
-补充：若无法启动桌宠可在Copilot添加仓库，并在`"你仓库存储位置"\copilot-worktrees\copilot-desktop-pet`中新建`.github\extensions`后将本仓库全部文件复制到`.github\extensions\copilot-desktop-pet`目录下，重载扩展即可，这是因为工作区中没有该插件所导致`Copilot`无法信任该扩展
+补充：若无法启动桌宠可在Copilot添加仓库，并在`"你仓库存储位置"\copilot-worktrees\copilot-desktop-pet`中新建`.github\extensions`后将本仓库或[从发行版下载](https://github.com/Ni-ShuWu/copilot-desktop-pet/releases)全部文件复制到`.github\extensions\copilot-desktop-pet`目录下，重载扩展即可，这是因为工作区中没有该插件所导致`Copilot`无法信任该扩展
 
 ## 使用
 
