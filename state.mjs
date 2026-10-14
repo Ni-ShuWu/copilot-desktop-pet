@@ -13,7 +13,7 @@ export const DEFAULT_CONFIG = {
     fps: 8,
     defaultAnimation: "idle",
     animations: { idle: { row: 0, frames: 4 } },
-    behavior: { autoWander: true, walkSpeedPxPerSec: 40, wanderIntervalSec: [3, 8], sleepAfterIdleSec: 45, lookAtCopilot: false },
+    behavior: { autoWander: true, omniWander: true, walkSpeedPxPerSec: 40, wanderIntervalSec: [3, 8], sleepAfterIdleSec: 45, lookAtCopilot: false },
     speech: { phrases: ["(◕‿◕)"], fontSize: 13 },
     // 聊天：消息发给当前 Copilot 会话，回复由桌宠说出来
     chat: {

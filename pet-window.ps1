@@ -206,7 +206,8 @@ $badge = $window.FindName("Badge")
 
 # ---- 状态 ----
 $script:mode = "idle"          # idle | walk | sleep
-$script:dir = 1
+$script:dir = 1                    # 动画朝向：1 用默认帧（偏右），-1 用 leftRow/镜像（偏左）
+$script:heading = 0.0              # 全向走动的行进角（弧度）：0=正右，PI/2=正下
 $script:frame = 0
 $script:activeFps = 0.0
 $script:hopY = 0.0
@@ -227,6 +228,8 @@ $script:disconnNotified = $false   # 同一段断连只提示一次
 $script:configWriteTime = (Get-Item $script:configPath).LastWriteTime
 $script:autoWander = $true
 try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
+$script:omniWander = $true
+try { $script:omniWander = [bool]$script:cfg.behavior.omniWander } catch {}
 $script:lookAtCopilot = $false
 try { $script:lookAtCopilot = [bool]$script:cfg.behavior.lookAtCopilot } catch {}
 $script:lookTarget = $null         # { found; dx; dy }：桌宠到 Copilot 对话框的方向（缓存）
@@ -489,7 +492,15 @@ function Decide {
 
     if ((Get-Random -Minimum 0 -Maximum 100) -lt 55 -and (Get-AnimDef "walk")) {
         $script:mode = "walk"
-        $script:dir = (Get-Random -Minimum 0 -Maximum 2) * 2 - 1
+        if ($script:omniWander) {
+            # 全向走动：随机角度（含上下与斜向）；动画复用左右两套——
+            # 偏左用向左动画、偏右用向右动画，纯上下时保持上一次朝向避免抖动
+            $script:heading = Get-PetRandomHeading
+            $facing = Get-PetFacing $script:heading
+            if ($facing -ne 0) { $script:dir = $facing }
+        } else {
+            $script:dir = (Get-Random -Minimum 0 -Maximum 2) * 2 - 1
+        }
     } else {
         $script:mode = "idle"
     }
@@ -515,10 +526,19 @@ $animTimer.Add_Tick({
         $speed = 40.0
         try { if ($script:cfg.behavior.walkSpeedPxPerSec) { $speed = [double]$script:cfg.behavior.walkSpeedPxPerSec } } catch {}
         $waNow = [System.Windows.SystemParameters]::WorkArea
-        $newLeft = $window.Left + $script:dir * $speed * $dt
-        if ($newLeft -le $waNow.Left) { $newLeft = $waNow.Left; $script:dir = 1 }
-        if ($newLeft -ge ($waNow.Right - $window.Width)) { $newLeft = $waNow.Right - $window.Width; $script:dir = -1 }
-        $window.Left = $newLeft
+        if ($script:omniWander) {
+            # 全向走动：撞到工作区边界按分量反射，斜向走到角落也能正确弹回
+            $step = Move-PetStep -X $window.Left -Y $window.Top -Angle $script:heading -Speed $speed -Seconds $dt -MinX $waNow.Left -MaxX ($waNow.Right - $window.Width) -MinY $waNow.Top -MaxY ($waNow.Bottom - $window.Height)
+            $script:heading = $step.Angle
+            if ($step.Dir -ne 0) { $script:dir = $step.Dir }
+            $window.Left = $step.X
+            $window.Top = $step.Y
+        } else {
+            $newLeft = $window.Left + $script:dir * $speed * $dt
+            if ($newLeft -le $waNow.Left) { $newLeft = $waNow.Left; $script:dir = 1 }
+            if ($newLeft -ge ($waNow.Right - $window.Width)) { $newLeft = $waNow.Right - $window.Width; $script:dir = -1 }
+            $window.Left = $newLeft
+        }
     }
 
     if ($script:hopV -ne 0 -or $script:hopY -ne 0) {

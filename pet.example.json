@@ -25,6 +25,7 @@
   },
   "behavior": {
     "autoWander": true,
+    "omniWander": true,
     "walkSpeedPxPerSec": 40,
     "wanderIntervalSec": [3, 8],
     "sleepAfterIdleSec": 45,
