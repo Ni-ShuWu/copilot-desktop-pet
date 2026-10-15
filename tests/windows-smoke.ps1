@@ -11,6 +11,12 @@ Assert-True ((Get-PetAnimationFps $fpsConfig 'walk') -eq 12) 'Each animation mus
 Assert-True ((Get-PetAnimationFps $fpsConfig 'sleep') -eq 2) 'Slow animation FPS must be preserved'
 Assert-True ((Get-PetAnimationFps $fpsConfig 'thinking') -eq 8) 'Animations without FPS must inherit the global FPS'
 Assert-True ((Get-PetAnimationFps $fpsConfig 'missing') -eq 8) 'Missing animations must fall back to the global FPS'
+$legacyConfig = [pscustomobject]@{ frameWidth = 32; frameHeight = 32; scale = 1; behavior = [pscustomobject]@{ autoWander = $true } }
+$legacyConfig = Convert-PetConfig $legacyConfig
+Assert-True ($legacyConfig.behavior.omniWander -eq $true) 'Missing omniWander must default to true in PowerShell config'
+$disabledConfig = [pscustomobject]@{ frameWidth = 32; frameHeight = 32; scale = 1; behavior = [pscustomobject]@{ autoWander = $true; omniWander = $false } }
+$disabledConfig = Convert-PetConfig $disabledConfig
+Assert-True ($disabledConfig.behavior.omniWander -eq $false) 'Explicit omniWander=false must be preserved in PowerShell config'
 
 # ---- 全向走动：纯函数（角度/朝向/位移与边界反射） ----
 $pi = [Math]::PI

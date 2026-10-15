@@ -588,6 +588,7 @@ $pollTimer.Add_Tick({
                     $bubbleText.FontSize = [double]$script:cfg.speech.fontSize
                     if ($geomChanged) { Update-Geometry }
                     try { $script:autoWander = [bool]$script:cfg.behavior.autoWander } catch {}
+                    try { $script:omniWander = [bool]$script:cfg.behavior.omniWander } catch {}
                     # 配置热重载：pollIntervalMs 变化时同步 DispatcherTimer 间隔
                     $newPollMs = Get-PollIntervalMs
                     if ($newPollMs -ne $script:pollMs) {
