@@ -195,3 +195,47 @@ function Remove-LibraryPet([string]$Id) {
     if (-not $resolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw '桌宠目录越界' }
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
+
+# ---- 全向走动：纯函数（不碰 WPF/磁盘，便于单测） ----
+# 坐标系与窗口一致：X 向右为正、Y 向下为正；角度为弧度，0 = 正右，PI/2 = 正下。
+# 桌宠沿固定角度匀速前进，撞到工作区边界就按分量反射，所以斜着走也会正常弹回来。
+function Get-PetRandomHeading {
+    # 0 <= 角度 < 2PI，均匀随机 -> 全向（含斜向）移动
+    return (Get-Random -Minimum 0 -Maximum 62832) / 10000.0
+}
+function Get-PetFacing([double]$Angle) {
+    # 朝向只看水平分量：偏左返回 -1、偏右返回 1、纯上下返回 0（表示保持原朝向）
+    if ([double]::IsNaN($Angle) -or [double]::IsInfinity($Angle)) { return 0 }
+    $cos = [Math]::Cos($Angle)
+    if ($cos -gt 1e-9) { return 1 }
+    if ($cos -lt -1e-9) { return -1 }
+    return 0
+}
+function Move-PetStep {
+    # 单帧位移：返回新的位置 / 反射后的角度 / 水平朝向 / 是否发生了反射
+    param(
+        [double]$X, [double]$Y, [double]$Angle, [double]$Speed, [double]$Seconds,
+        [double]$MinX, [double]$MaxX, [double]$MinY, [double]$MaxY
+    )
+    if ([double]::IsNaN($Angle) -or [double]::IsInfinity($Angle)) { $Angle = 0.0 }
+    if ([double]::IsNaN($Speed) -or [double]::IsInfinity($Speed) -or $Speed -lt 0) { $Speed = 0.0 }
+    if ([double]::IsNaN($Seconds) -or [double]::IsInfinity($Seconds) -or $Seconds -lt 0) { $Seconds = 0.0 }
+    if ($MaxX -lt $MinX) { $MaxX = $MinX }
+    if ($MaxY -lt $MinY) { $MaxY = $MinY }
+    $nextX = $X + ([Math]::Cos($Angle) * $Speed * $Seconds)
+    $nextY = $Y + ([Math]::Sin($Angle) * $Speed * $Seconds)
+    $bounced = $false
+    # 左右反射：cos 变号（角度 -> PI - 角度）；上下反射：sin 变号（角度 -> -角度）
+    # 顺序无关：先反射 X 不改变 sin 的符号，再反射 Y 的结果与同时反射一致
+    if ($nextX -lt $MinX) { $nextX = $MinX; $Angle = [Math]::PI - $Angle; $bounced = $true }
+    elseif ($nextX -gt $MaxX) { $nextX = $MaxX; $Angle = [Math]::PI - $Angle; $bounced = $true }
+    if ($nextY -lt $MinY) { $nextY = $MinY; $Angle = -$Angle; $bounced = $true }
+    elseif ($nextY -gt $MaxY) { $nextY = $MaxY; $Angle = -$Angle; $bounced = $true }
+    return [pscustomobject]@{
+        X       = $nextX
+        Y       = $nextY
+        Angle   = $Angle
+        Dir     = (Get-PetFacing $Angle)
+        Bounced = $bounced
+    }
+}

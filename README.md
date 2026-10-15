@@ -79,6 +79,7 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
   },
   "behavior": {
     "autoWander": true,
+    "omniWander": true,
     "walkSpeedPxPerSec": 40,
     "wanderIntervalSec": [3, 8],
     "sleepAfterIdleSec": 45,
@@ -115,6 +116,7 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
 | `pollIntervalMs` | 状态轮询间隔（毫秒，默认 250）；SSE 可用时主要作为兜底。 |
 | `animations` | 动画名到贴图行号、帧数的映射；每个动画可单独设置 `fps`、`leftRow`，`fps` 未设置时沿用全局值。 |
 | `behavior.autoWander` | 是否自动走动。 |
+| `behavior.omniWander` | 是否全向走动（上下与斜向，每次随机角度）。设为 `false` 退回只沿水平方向来回走。 |
 | `behavior.walkSpeedPxPerSec` | 每秒移动像素数。 |
 | `behavior.wanderIntervalSec` | 自动行为切换的最短、最长间隔（秒）。 |
 | `behavior.sleepAfterIdleSec` | 无交互后多久睡觉；设为 `0` 禁用自动睡眠。 |

@@ -156,7 +156,7 @@
   var imgReady = false;
 
   var pet = {
-    x: 60, dir: 1, anim: "idle", frame: 0, frameTimer: 0,
+    x: 60, y: -1, dir: 1, heading: 0, anim: "idle", frame: 0, frameTimer: 0,
     mode: "idle", nextDecisionAt: Date.now() + 3000,
     lastInteractionAt: Date.now(), dragging: false, dragOffsetX: 0,
     hopV: 0, hopY: 0, remoteOverride: null,
@@ -192,6 +192,32 @@
 
   function rand(min, max) { return min + Math.random() * (max - min); }
   function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+  // ---- 全向走动（与 pet-data.ps1 的 Get-PetRandomHeading/Get-PetFacing/Move-PetStep 同算法）----
+  // 坐标系：x 向右、y 向下；角度 0 = 正右，PI/2 = 正下。
+  var TAU = Math.PI * 2;
+  function randomHeading() { return Math.random() * TAU; }
+  function headingFacing(angle) {
+    if (!isFinite(angle)) return 0;
+    var c = Math.cos(angle);
+    if (c > 1e-9) return 1;    // 偏右 -> 用向右动画
+    if (c < -1e-9) return -1;  // 偏左 -> 用向左动画
+    return 0;                  // 纯上下 -> 保持上一次朝向
+  }
+  function stepMotion(x, y, angle, speed, dt, minX, maxX, minY, maxY) {
+    if (!isFinite(angle)) angle = 0;
+    if (!isFinite(speed) || speed < 0) speed = 0;
+    if (!isFinite(dt) || dt < 0) dt = 0;
+    if (maxX < minX) maxX = minX;
+    if (maxY < minY) maxY = minY;
+    var nx = x + Math.cos(angle) * speed * dt;
+    var ny = y + Math.sin(angle) * speed * dt;
+    if (nx < minX) { nx = minX; angle = Math.PI - angle; }
+    else if (nx > maxX) { nx = maxX; angle = Math.PI - angle; }
+    if (ny < minY) { ny = minY; angle = -angle; }
+    else if (ny > maxY) { ny = maxY; angle = -angle; }
+    return { x: nx, y: ny, angle: angle, dir: headingFacing(angle) };
+  }
 
   function showError(msg) {
     errBox.style.display = msg ? "block" : "none";
@@ -258,9 +284,13 @@
   }
 
   function clampToStage() {
-    var w = canvas.getBoundingClientRect().width || 128;
+    var rect = canvas.getBoundingClientRect();
+    var w = rect.width || 128;
+    var h = rect.height || w;
     var maxX = Math.max(0, window.innerWidth - w);
+    var maxY = Math.max(0, window.innerHeight - h);
     pet.x = Math.min(Math.max(pet.x, 0), maxX);
+    if (pet.y >= 0) pet.y = Math.min(Math.max(pet.y, 0), maxY);
   }
 
   function currentAnimName() {
@@ -290,7 +320,14 @@
 
     if (Math.random() < 0.55 && config.animations.walk) {
       pet.mode = "walk";
-      pet.dir = Math.random() < 0.5 ? -1 : 1;
+      if (b.omniWander === false) {
+        pet.dir = Math.random() < 0.5 ? -1 : 1;
+      } else {
+        // 全向走动：随机角度（含上下与斜向）；动画仍复用左右两套
+        pet.heading = randomHeading();
+        var facing = headingFacing(pet.heading);
+        if (facing !== 0) pet.dir = facing;
+      }
     } else {
       pet.mode = "idle";
     }
@@ -318,10 +355,18 @@
       if (Date.now() >= pet.nextDecisionAt) decide();
       if (pet.mode === "walk") {
         var speed = b.walkSpeedPxPerSec || 40;
-        pet.x += pet.dir * speed * dt;
         var w = canvas.getBoundingClientRect().width;
-        if (pet.x <= 0) { pet.x = 0; pet.dir = 1; }
-        if (pet.x >= window.innerWidth - w) { pet.x = window.innerWidth - w; pet.dir = -1; }
+        var h = canvas.getBoundingClientRect().height;
+        if (b.omniWander === false) {
+          pet.x += pet.dir * speed * dt;
+          if (pet.x <= 0) { pet.x = 0; pet.dir = 1; }
+          if (pet.x >= window.innerWidth - w) { pet.x = window.innerWidth - w; pet.dir = -1; }
+        } else {
+          if (pet.y < 0) pet.y = window.innerHeight - h;   // 首次走动：从当前底部位置起步
+          var motion = stepMotion(pet.x, pet.y, pet.heading, speed, dt, 0, window.innerWidth - w, 0, window.innerHeight - h);
+          pet.x = motion.x; pet.y = motion.y; pet.heading = motion.angle;
+          if (motion.dir !== 0) pet.dir = motion.dir;
+        }
       }
     }
 
@@ -355,7 +400,9 @@
       }
     }
     canvas.style.left = pet.x + "px";
-    canvas.style.bottom = (10 + pet.hopY) + "px";
+    // 底边定位时 bottom 越大越靠上，所以竖直偏移取 +hopY；改用 top 定位后方向相反
+    if (pet.y >= 0) { canvas.style.top = (pet.y - pet.hopY) + "px"; canvas.style.bottom = ""; }
+    else { canvas.style.top = ""; canvas.style.bottom = (10 + pet.hopY) + "px"; }
   }
 
   function setBubble(text, ms) {
