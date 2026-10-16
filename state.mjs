@@ -51,6 +51,8 @@ export const ERROR_PHRASES = ["出错了……我有点懵。", "这次没跑通
 
 // 特殊动画别名：pet.json 里用哪个名字都行，按顺序取第一个存在的
 export const ANIM_ALIASES = {
+    startup: ["startup", "start", "spawn"],
+    permission: ["permission", "approval", "approve", "authorize"],
     thinking: ["thinking", "think", "reasoning"],
     tool: ["work", "typing", "busy"],
     drag: ["drag", "grab", "lift"],
