@@ -309,6 +309,8 @@ function Get-AnimDef([string]$name) {
 
 # 特殊动画别名：pet.json 里写哪个名字都认（顺序即优先级），和 state.mjs 的 ANIM_ALIASES 一致
 $script:animAliases = @{
+    startup    = @("startup", "start", "spawn")
+    permission = @("permission", "approval", "approve", "authorize")
     thinking = @("thinking", "think", "reasoning")
     tool     = @("work", "typing", "busy")
     drag     = @("drag", "grab", "lift")
@@ -331,8 +333,22 @@ function Get-AnimAlias([string]$kind) {
     return $null
 }
 
+$script:startupAnimation = $null
+$script:startupUntil = [DateTime]::MinValue
+$window.Add_ContentRendered({
+    $name = Get-AnimAlias "startup"
+    if ($name) {
+        $anim = Get-AnimDef $name
+        $frames = [Math]::Max(1, [int]$anim.frames)
+        $script:frame = $frames - 1
+        $script:startupAnimation = $name
+        $script:startupUntil = (Get-Date).AddSeconds($frames / (Get-PetAnimationFps $script:cfg $name))
+    }
+})
+
 function Resolve-AnimName {
     if ($script:overrideAnim -and (Get-AnimDef $script:overrideAnim)) { return $script:overrideAnim }
+    if ($script:startupAnimation -and (Get-Date) -lt $script:startupUntil) { return $script:startupAnimation }
     if ($script:dragging) {
         $n = Get-AnimAlias "drag"; if ($n) { return $n }
     }
@@ -340,6 +356,10 @@ function Resolve-AnimName {
         $n = Get-AnimAlias "poke"; if ($n) { return $n }
     }
     if ($script:activity -eq "working") {
+        # 工具执行阶段暂作权限等待的近似信号；没有该动画时仍使用原 work 动画
+        if ($script:workPhase -eq "tool") {
+            $n = Get-AnimAlias "permission"; if ($n) { return $n }
+        }
         # 思考中（模型在想）和干活（跑工具）分开演；拿不到阶段时按老行为演 work
         if ($script:workPhase -eq "thinking") {
             $n = Get-AnimAlias "thinking"; if ($n) { return $n }

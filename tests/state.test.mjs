@@ -263,6 +263,8 @@ test("resolveAnimAlias: 按别名顺序取第一个存在的动画", () => {
     assert.equal(resolveAnimAlias("tool", cfg), "work");
     assert.equal(resolveAnimAlias("chat", cfg), "chat");
     assert.equal(resolveAnimAlias("thinking", cfg), null, "没有 thinking/think/reasoning 时返回 null");
+    assert.equal(resolveAnimAlias("startup", mergeConfig({ animations: { start: { row: 3, frames: 4 } } })), "start");
+    assert.equal(resolveAnimAlias("permission", mergeConfig({ animations: { approval: { row: 4, frames: 4 } } })), "approval");
     assert.equal(resolveAnimAlias("error", cfg), null);
     assert.equal(resolveAnimAlias("unknown-kind", cfg), null);
 

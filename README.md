@@ -75,7 +75,9 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
     "sleep": { "row": 2, "frames": 4, "fps": 2 },
     "thinking": { "row": 3, "frames": 4 },
     "work": { "row": 4, "frames": 4 },
-    "review": { "row": 9, "frames": 4 }
+    "review": { "row": 9, "frames": 4 },
+    "startup": { "row": 12, "frames": 4 },
+    "permission": { "row": 13, "frames": 4 }
   },
   "behavior": {
     "autoWander": true,
@@ -127,7 +129,7 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\pet-settings.ps1
 | `chat.offlineReplies` | 无法取得回复时显示的随机台词。 |
 | `externalEvents` | 可选的本机外部工作状态推送设置，见下文。 |
 
-动画项中的 `fps` 是该动画每秒播放的帧数；例如可设为 `"idle": { "row": 0, "frames": 4, "fps": 5 }`、`"walk": { "row": 1, "frames": 4, "fps": 12 }`、`"sleep": { "row": 2, "frames": 4, "fps": 2 }`。这些数值仅作示例，可在运行时观察后自行调整；省略时沿用全局 `fps`。常用动画名：`idle`、`walk`、`sleep`、`thinking`、`work`、`chat`、`look`、`drag`、`poke`、`review`、`aborted`、`error`。可自定义名称；名称与行为别名匹配时会自动用于对应场景。动画优先级大致为手动指定、拖动、点击、思考、工具工作、聊天、注视、睡眠、走动、待机。
+动画项中的 `fps` 是该动画每秒播放的帧数；例如可设为 `"idle": { "row": 0, "frames": 4, "fps": 5 }`、`"walk": { "row": 1, "frames": 4, "fps": 12 }`、`"sleep": { "row": 2, "frames": 4, "fps": 2 }`。这些数值仅作示例，可在运行时观察后自行调整；省略时沿用全局 `fps`。常用动画名：`idle`、`walk`、`sleep`、`thinking`、`work`、`chat`、`look`、`drag`、`poke`、`review`、`aborted`、`error`、`startup`、`permission`。`startup` 在桌宠显示时播放一轮；`permission` 在工具执行阶段播放，作为 Copilot 审批等待的近似提示（当前没有待审批事件信号，实际播放时机可能晚于批准）。可自定义名称；名称与行为别名匹配时会自动用于对应场景。动画优先级大致为手动指定、启动、拖动、点击、思考、权限/工具工作、聊天、注视、睡眠、走动、待机。
 
 「看着对话框」通过 Windows 窗口识别定位 Copilot，不依赖会话标题。若窗口不可见或最小化，桌宠保持默认朝向；窗口重新出现后会继续跟随。输入框可被 UI Automation 识别时会朝输入框看，否则朝窗口下方看。
 
