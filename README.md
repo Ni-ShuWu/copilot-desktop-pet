@@ -1,5 +1,9 @@
 # Copilot 桌宠
 
+![Static Badge](https://img.shields.io/badge/GitHub-Copilot-App?style=flat&logo=github&logoColor=%23FFFFFF&label=GitHub&labelColor=%230D0923&color=%23FFFFFF)
+
+
+
 一只住在 Windows 桌面上的 2D 桌宠，通过 GitHub Copilot App 扩展与 Copilot 会话联动。它会在桌面走动、睡觉、回应点击，也能在你工作时敲电脑、完成后复盘。
 
 > 桌面窗口使用 WPF 和 PowerShell；扩展入口使用 Node.js。桌宠不需要额外的 Node.js 运行时依赖。
