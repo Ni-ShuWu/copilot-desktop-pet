@@ -1,5 +1,7 @@
 # Copilot 桌宠
 
+目前已停止维护，相关桌宠请移步至：[At-pet](https://github.com/At-PetAdmin/At-Pet)
+
 ![Static Badge](https://img.shields.io/badge/GitHub-Copilot-App?style=flat&logo=github&logoColor=%23FFFFFF&label=GitHub&labelColor=%230D0923&color=%23FFFFFF)
 
 
